@@ -7,8 +7,9 @@
 веб-установщик и что-то донастраивать не нужно.
 
 ```bash
-git clone https://github.com/USER/wp-autoinstall.git
-cd wp-autoinstall
+git clone https://github.com/perov4265-web/wp.git
+cd wp
+chmod +x /root/wp/install.sh /root/wp/uninstall.sh
 sudo ./install.sh
 ```
 
