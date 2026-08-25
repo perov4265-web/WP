@@ -23,11 +23,38 @@ init_log() {
   log "=== wp-autoinstall $(date '+%F %T') ==="
 }
 log()  { printf '%s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true; }
-info() { printf '\n%s>>>%s %s%s%s\n' "$C_BLUE" "$C_RESET" "$C_BOLD" "$*" "$C_RESET"; log "[INFO] $*"; }
-ok()   { printf '  %s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*"; log "[ OK ] $*"; }
-step() { printf '  %s·%s %s\n' "$C_DIM" "$C_RESET" "$*"; log "[STEP] $*"; }
-warn() { printf '  %s!%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; log "[WARN] $*"; }
-err()  { printf '  %s✗%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; log "[ERR ] $*"; }
+
+# Когда включён экран установки (lib/screen.sh), сообщения не прокручиваются,
+# а обновляют строку состояния на одном и том же месте.
+_on_screen() { [[ "${SCREEN_ACTIVE:-0}" == "1" ]]; }
+
+info() {
+  log "[INFO] $*"
+  if _on_screen; then progress_next "$*"
+  else printf '\n%s>>>%s %s%s%s\n' "$C_BLUE" "$C_RESET" "$C_BOLD" "$*" "$C_RESET"; fi
+}
+ok() {
+  log "[ OK ] $*"
+  if _on_screen; then screen_status_ok "$*"
+  else printf '  %s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*"; fi
+}
+step() {
+  log "[STEP] $*"
+  if _on_screen; then screen_status "$*"
+  else printf '  %s·%s %s\n' "$C_DIM" "$C_RESET" "$*"; fi
+}
+warn() {
+  log "[WARN] $*"
+  if _on_screen; then
+    SCREEN_WARNINGS+=("$*")
+    screen_status_warn "$*"
+  else printf '  %s!%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; fi
+}
+err() {
+  log "[ERR ] $*"
+  _on_screen && screen_restore
+  printf '  %s✗%s %s\n' "$C_RED" "$C_RESET" "$*" >&2
+}
 die()  { err "$*"; printf '\n%sЛог установки: %s%s\n' "$C_DIM" "$LOG_FILE" "$C_RESET" >&2; exit 1; }
 
 on_error() {
@@ -145,8 +172,16 @@ v_phpver() {
 }
 
 # ---------- интерактивный ввод ----------
+# На время вопроса экран установки приостанавливается, после ответа — перерисовывается.
+_screen_pause_safe()  { [[ "${SCREEN_ACTIVE:-0}" == "1" ]] && screen_pause; return 0; }
+_screen_resume_safe() { [[ "${SCREEN_ACTIVE:-0}" == "2" ]] && screen_resume; return 0; }
+
+ask()        { _screen_pause_safe; _ask "$@";        local rc=$?; _screen_resume_safe; return "$rc"; }
+ask_secret() { _screen_pause_safe; _ask_secret "$@"; local rc=$?; _screen_resume_safe; return "$rc"; }
+ask_yn()     { _screen_pause_safe; _ask_yn "$@";     local rc=$?; _screen_resume_safe; return "$rc"; }
+
 # ask ИМЯ_ПЕРЕМЕННОЙ "Вопрос" "значение по умолчанию" [валидатор]
-ask() {
+_ask() {
   local __name="$1" prompt="$2" def="${3:-}" validator="${4:-}" input msg
   local current="${!__name-}"
   [[ -n "$current" ]] && def="$current"
@@ -177,7 +212,7 @@ ask() {
 }
 
 # ask_secret ИМЯ "Вопрос" [валидатор] — скрытый ввод, пустой ввод = сгенерировать
-ask_secret() {
+_ask_secret() {
   local __name="$1" prompt="$2" validator="${3:-v_dbpass}" a b msg
   local current="${!__name-}"
 
@@ -207,7 +242,7 @@ ask_secret() {
 }
 
 # ask_yn ИМЯ "Вопрос" "yes|no"
-ask_yn() {
+_ask_yn() {
   local __name="$1" prompt="$2" def="${3:-no}" input
   local current="${!__name-}"
   if [[ -n "$current" ]]; then

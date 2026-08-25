@@ -212,6 +212,37 @@ check "apache: AllowOverride All"      "$AP" "AllowOverride All"
 check "apache: alias phpMyAdmin"       "$AP" "Alias /phpmyadmin /usr/share/phpmyadmin"
 [[ -f "${TMP}/site-apache/.htaccess" ]] && pass "apache: .htaccess создан" || fail "apache: нет .htaccess"
 
+# ======================================= экран установки (нужен псевдотерминал)
+if command -v script >/dev/null 2>&1; then
+  printf '\n\033[1mПроверка экрана установки\033[0m\n'
+  sed -e 's/^SITE_DOMAIN=.*/SITE_DOMAIN=screen.example.com/' \
+      -e "s#^WP_PATH=.*#WP_PATH=${TMP}/site-screen#" \
+      -e 's/^WEB_SERVER=.*/WEB_SERVER=nginx/' \
+      "${TMP}/test.conf" > "${TMP}/test-screen.conf"
+  TS="${TMP}/typescript"
+  TERM=xterm script -qec \
+    "PATH=${MOCK}:\$PATH LOG_FILE=${TMP}/install-screen.log bash ${ROOT}/install.sh -c ${TMP}/test-screen.conf -y --force" \
+    "$TS" >/dev/null 2>&1 || true
+  if grep -q 'Установка WordPress' "$TS"; then pass "экран: рамка с параметрами нарисована"; else fail "экран: рамки нет"; fi
+  if grep -q 'screen.example.com' "$TS"; then pass "экран: параметры выведены в рамке"; else fail "экран: параметров нет"; fi
+  if grep -q 'Этап .* из ' "$TS"; then pass "экран: строка этапа"; else fail "экран: строки этапа нет"; fi
+  if grep -qE '(█|#)+' "$TS"; then pass "экран: прогресс-бар"; else fail "экран: прогресс-бара нет"; fi
+  if grep -qP '\x1b\[[0-9]+;1H' "$TS"; then pass "экран: вывод на фиксированные строки"; else fail "экран: нет позиционирования курсора"; fi
+  if grep -q '100%' "$TS"; then pass "экран: прогресс дошёл до 100%"; else fail "экран: нет 100%"; fi
+
+  # --plain обязан отключать экран
+  TS2="${TMP}/typescript-plain"
+  sed -e 's/^SITE_DOMAIN=.*/SITE_DOMAIN=plain.example.com/' \
+      -e "s#^WP_PATH=.*#WP_PATH=${TMP}/site-plain#" \
+      "${TMP}/test.conf" > "${TMP}/test-plain.conf"
+  TERM=xterm script -qec \
+    "PATH=${MOCK}:\$PATH LOG_FILE=${TMP}/install-plain.log bash ${ROOT}/install.sh -c ${TMP}/test-plain.conf -y --force --plain" \
+    "$TS2" >/dev/null 2>&1 || true
+  if grep -q 'Установка WordPress ─' "$TS2"; then fail "--plain: экран всё равно нарисован"; else pass "--plain: обычный вывод без экрана"; fi
+else
+  printf '\n  (пропуск проверки экрана: нет команды script)\n'
+fi
+
 # ================================================= модульные проверки функций
 printf '\n\033[1mПроверка отдельных функций\033[0m\n'
 (
