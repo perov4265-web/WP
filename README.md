@@ -10,7 +10,7 @@
 git clone https://github.com/perov4265-web/wp.git
 cd wp
 chmod +x /root/wp/install.sh /root/wp/uninstall.sh
-sudo ./install.sh
+./install.sh
 ```
 
 Через несколько минут сайт открывается по адресу `http://ваш-домен/`, а панель
