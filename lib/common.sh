@@ -304,11 +304,61 @@ detect_public_ip() {
 
 is_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 
-service_exists() { systemctl list-unit-files --type=service 2>/dev/null | grep -q "^$1\.service"; }
+# Существует ли служба. Одного способа мало: вывод list-unit-files зависит от
+# версии systemd и ширины терминала, поэтому проверяем тремя путями подряд.
+service_exists() {
+  local s="${1%.service}" d
+  [[ -n "$s" ]] || return 1
+
+  systemctl list-unit-files --type=service --no-legend --no-pager 2>/dev/null \
+    | awk '{print $1}' | grep -qxF "${s}.service" && return 0
+
+  systemctl cat "${s}.service" >/dev/null 2>&1 && return 0
+
+  for d in /lib/systemd/system /usr/lib/systemd/system /etc/systemd/system; do
+    [[ -f "${d}/${s}.service" ]] && return 0
+  done
+  return 1
+}
+
+# Все службы вида php*-fpm, что есть в системе, от старых версий к новым
+list_php_fpm_services() {
+  {
+    systemctl list-unit-files --type=service --no-legend --no-pager 2>/dev/null | awk '{print $1}'
+    ls -1 /lib/systemd/system /usr/lib/systemd/system /etc/systemd/system 2>/dev/null
+  } | grep -oE '^php[0-9.]*-fpm\.service$' | sed 's/\.service$//' | sort -V -u
+}
 
 svc_restart() {
-  local s="$1"
+  local s="$1" attempt
   run systemctl enable "$s" || true
-  run systemctl restart "$s" || die "Не удалось запустить службу $s. Проверьте: systemctl status $s"
-  ok "Служба $s запущена"
+
+  # Две попытки: на слабой машине сразу после установки пакетов systemd бывает
+  # занят перечитыванием юнитов и отвечает по D-Bus не с первого раза.
+  for attempt in 1 2; do
+    if run systemctl restart "$s"; then
+      ok "Служба $s запущена"
+      return 0
+    fi
+    if (( attempt == 1 )); then
+      step "Служба $s не отозвалась, повторяю через 3 секунды"
+      run systemctl daemon-reload || true
+      sleep 3
+    fi
+  done
+
+  # Не просто «не удалось»: показываем, что именно сказал systemd
+  log "[ERR ] служба $s не запустилась, состояние ниже"
+  systemctl status "$s" --no-pager -l -n 20 >> "$LOG_FILE" 2>&1 || true
+  journalctl -u "$s" --no-pager -n 30 >> "$LOG_FILE" 2>&1 || true
+
+  local hint=""
+  if ! service_exists "$s"; then
+    hint="Такой службы в системе нет. Установленные: $(list_php_fpm_services | tr '\n' ' ')"
+  else
+    hint="$(systemctl status "$s" --no-pager -l -n 3 2>/dev/null | tail -n 3 | tr '\n' ' ')"
+  fi
+  err "Не удалось запустить службу ${s}."
+  [[ -n "$hint" ]] && err "${hint}"
+  die "Подробности в журнале: ${LOG_FILE}"
 }

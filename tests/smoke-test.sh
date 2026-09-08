@@ -44,9 +44,20 @@ exit 1
 M
 cat > "${MOCK}/systemctl" <<'M'
 #!/bin/sh
+# ведёт себя как настоящий systemctl: знает только существующие юниты
 case "$1" in
   is-active) exit 1 ;;
-  list-unit-files) echo "php__PHPV__-fpm.service enabled"; echo "mariadb.service enabled"; exit 0 ;;
+  list-unit-files)
+    echo "php__PHPV__-fpm.service enabled enabled"
+    echo "mariadb.service          enabled enabled"
+    echo "nginx.service            enabled enabled"
+    exit 0 ;;
+  cat)
+    case "$2" in
+      php__PHPV__-fpm.service|mariadb.service|nginx.service|apache2.service) exit 0 ;;
+      *) echo "No files found for $2." >&2; exit 1 ;;
+    esac ;;
+  status) echo "Unit $2 could not be found."; exit 4 ;;
 esac
 exit 0
 M
@@ -532,6 +543,72 @@ printf '\n\033[1mПроверка отдельных функций\033[0m\n'
     pass "последовательности \\n тоже считаются за строки"
   else
     fail "литеральные \\n не учитываются в высоте (${H_ESC} против ${H_MANY})"
+  fi
+
+  # Каталог в /etc/php мог остаться от снесённого пакета. Выбирать версию нужно
+  # по тому, для какой из них есть служба, иначе установка падает на несуществующей.
+  FAKEBIN="${TMP}/fakebin"; mkdir -p "$FAKEBIN"
+  cat > "${FAKEBIN}/systemctl" <<'M'
+#!/bin/sh
+case "$1" in
+  list-unit-files) echo "php8.3-fpm.service enabled enabled"; exit 0 ;;
+  cat) case "$2" in php8.3-fpm.service) exit 0 ;; *) exit 1 ;; esac ;;
+  is-active) exit 1 ;;
+esac
+exit 0
+M
+  chmod +x "${FAKEBIN}/systemctl"
+  mkdir -p /etc/php/8.3/fpm/pool.d /etc/php/9.9/fpm/pool.d
+  echo "listen = /run/php/php8.3-fpm.sock" > /etc/php/8.3/fpm/pool.d/www.conf
+
+  PHP_VERSION=auto; PHP_VER=""; PHP_FPM_SERVICE=""; PHP_FPM_LISTEN=""; PHP_FPM_PASS=""
+  PATH="${FAKEBIN}:${PATH}" detect_php >/dev/null 2>&1
+  if [[ "$PHP_FPM_SERVICE" == "php8.3-fpm" ]]; then
+    pass "версия PHP выбрана по существующей службе (php8.3-fpm)"
+  else
+    fail "выбрана служба «${PHP_FPM_SERVICE}» вместо php8.3-fpm"
+  fi
+  if [[ "$PHP_VER" == "8.3" ]]; then
+    pass "каталог настроек соответствует службе"
+  else
+    fail "каталог настроек ${PHP_VER} не соответствует службе"
+  fi
+  if [[ "$PHP_FPM_PASS" == "unix:/run/php/php8.3-fpm.sock" ]]; then
+    pass "сокет прочитан из конфигурации пула"
+  else
+    fail "сокет определён неверно: ${PHP_FPM_PASS}"
+  fi
+  rm -rf /etc/php/9.9
+
+  # systemctl может временно не отвечать (D-Bus занят после установки пакетов) —
+  # тогда служба должна находиться по файлу юнита на диске
+  DEADBIN="${TMP}/deadbin"; mkdir -p "$DEADBIN"
+  printf '#!/bin/sh\necho "Failed to list unit files: Connection timed out" >&2\nexit 1\n' > "${DEADBIN}/systemctl"
+  chmod +x "${DEADBIN}/systemctl"
+  mkdir -p /lib/systemd/system
+  touch /lib/systemd/system/php-test-fpm.service
+  if PATH="${DEADBIN}:${PATH}" service_exists "php-test-fpm"; then
+    pass "служба найдена по файлу юнита при молчащем systemctl"
+  else
+    fail "служба не найдена, хотя файл юнита на месте"
+  fi
+  if PATH="${DEADBIN}:${PATH}" service_exists "php-missing-fpm"; then
+    fail "несуществующая служба найдена при молчащем systemctl"
+  else
+    pass "несуществующая служба отвергнута и при молчащем systemctl"
+  fi
+  rm -f /lib/systemd/system/php-test-fpm.service
+
+  # несуществующая служба должна отвергаться, а не считаться найденной
+  if PATH="${FAKEBIN}:${PATH}" service_exists "php-fpm"; then
+    fail "service_exists считает существующей несуществующую службу php-fpm"
+  else
+    pass "service_exists отвергает несуществующую службу"
+  fi
+  if PATH="${FAKEBIN}:${PATH}" service_exists "php8.3-fpm"; then
+    pass "service_exists находит установленную службу"
+  else
+    fail "service_exists не нашёл установленную службу"
   fi
 
   # понижение уровня вывода ядра не должно ломаться там, где /proc недоступен

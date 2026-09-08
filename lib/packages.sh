@@ -149,34 +149,80 @@ install_php_packages() {
 }
 
 # Определяет PHP_VER, PHP_FPM_SERVICE, PHP_FPM_LISTEN, PHP_FPM_PASS
+# Имя службы PHP-FPM для конкретной версии: в разных сборках оно разное
+php_fpm_unit_for() {
+  local v="$1" cand
+  for cand in "php${v}-fpm" "php-fpm${v}" "php${v}.0-fpm"; do
+    if service_exists "$cand"; then printf '%s' "$cand"; return 0; fi
+  done
+  return 1
+}
+
+# Определяет PHP_VER, PHP_FPM_SERVICE, PHP_FPM_LISTEN, PHP_FPM_PASS
+#
+# Важно: версию выбираем не по каталогу в /etc/php, а по тому, для какой версии
+# в системе реально есть служба. Каталог мог остаться от снесённого пакета —
+# тогда прежняя логика брала его, не находила службу и скатывалась в имя
+# php-fpm, которого в Debian и Ubuntu не существует вовсе.
 detect_php() {
   info "Определение версии PHP"
-  local v="" d
-  if [[ -n "${PHP_VERSION:-}" && "$PHP_VERSION" != "auto" && -d "/etc/php/${PHP_VERSION}/fpm" ]]; then
-    v="$PHP_VERSION"
-  else
-    for d in $(find /etc/php -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V); do
-      [[ -d "/etc/php/${d}/fpm" ]] && v="$d"
+
+  local -a versions=()
+  local d
+  for d in $(find /etc/php -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null \
+             | grep -E '^[0-9]+\.[0-9]+$' | sort -V); do
+    [[ -d "/etc/php/${d}/fpm" ]] && versions+=("$d")
+  done
+
+  local v="" unit="" i
+  # 1. запрошенная версия, если её служба установлена
+  if [[ -n "${PHP_VERSION:-}" && "$PHP_VERSION" != "auto" ]]; then
+    if unit="$(php_fpm_unit_for "$PHP_VERSION")"; then v="$PHP_VERSION"; fi
+  fi
+  # 2. самая свежая версия из /etc/php, у которой служба установлена
+  if [[ -z "$v" && ${#versions[@]} -gt 0 ]]; then
+    for (( i = ${#versions[@]} - 1; i >= 0; i-- )); do
+      if unit="$(php_fpm_unit_for "${versions[$i]}")"; then v="${versions[$i]}"; break; fi
     done
   fi
-  [[ -n "$v" ]] || die "PHP-FPM не найден в /etc/php/*/fpm. Установка PHP не удалась."
+  # 3. любая служба php*-fpm, какая нашлась
+  if [[ -z "$v" ]]; then
+    unit="$(list_php_fpm_services | tail -n1)"
+    if [[ -n "$unit" ]]; then
+      v="$(sed -E 's/^php([0-9]+\.[0-9]+).*/\1/' <<< "$unit")"
+      warn "Служба ${unit} не совпала с каталогами в /etc/php — берём её."
+    fi
+  fi
+  # 4. служб нет вовсе: конфигурация есть, значит пакет стоит, но systemd о нём не знает
+  if [[ -z "$v" ]]; then
+    [[ ${#versions[@]} -gt 0 ]] || die "PHP-FPM не найден: нет ни каталогов /etc/php/*/fpm, ни служб php*-fpm. Установка PHP не удалась."
+    v="${versions[${#versions[@]} - 1]}"
+    unit="php${v}-fpm"
+    warn "Служба ${unit} не зарегистрирована в systemd — пробуем перечитать список юнитов."
+    run systemctl daemon-reload || true
+    service_exists "$unit" || warn "Служба ${unit} по-прежнему не найдена; попытка запуска может не удаться."
+  fi
 
   PHP_VER="$v"
-  PHP_FPM_SERVICE="php${v}-fpm"
-  service_exists "$PHP_FPM_SERVICE" || PHP_FPM_SERVICE="php-fpm"
+  PHP_FPM_SERVICE="$unit"
+
+  # каталог конфигурации может не совпасть с версией службы
+  if [[ ! -d "/etc/php/${PHP_VER}/fpm" && ${#versions[@]} -gt 0 ]]; then
+    warn "Каталога /etc/php/${PHP_VER}/fpm нет, настраиваем ${versions[${#versions[@]} - 1]}."
+    PHP_VER="${versions[${#versions[@]} - 1]}"
+  fi
 
   local listen=""
-  if [[ -r "/etc/php/${v}/fpm/pool.d/www.conf" ]]; then
-    listen="$(sed -n 's/^[[:space:]]*listen[[:space:]]*=[[:space:]]*//p' "/etc/php/${v}/fpm/pool.d/www.conf" | head -n1)"
+  if [[ -r "/etc/php/${PHP_VER}/fpm/pool.d/www.conf" ]]; then
+    listen="$(sed -n 's/^[[:space:]]*listen[[:space:]]*=[[:space:]]*//p' "/etc/php/${PHP_VER}/fpm/pool.d/www.conf" | head -n1)"
   fi
-  [[ -n "$listen" ]] || listen="/run/php/php${v}-fpm.sock"
+  [[ -n "$listen" ]] || listen="/run/php/php${PHP_VER}-fpm.sock"
   listen="${listen%%[[:space:]]*}"
 
+  PHP_FPM_LISTEN="$listen"
   if [[ "$listen" == /* ]]; then
-    PHP_FPM_LISTEN="$listen"
     PHP_FPM_PASS="unix:${listen}"
   else
-    PHP_FPM_LISTEN="$listen"
     PHP_FPM_PASS="${listen}"
   fi
   ok "PHP ${PHP_VER}, служба ${PHP_FPM_SERVICE}, сокет ${PHP_FPM_LISTEN}"
