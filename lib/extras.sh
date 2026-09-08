@@ -106,14 +106,25 @@ setup_firewall() {
   run ufw --force reset || true
   run ufw default deny incoming || true
   run ufw default allow outgoing || true
-  run ufw allow OpenSSH || run ufw allow 22/tcp || true
+  if [[ -n "${SSH_ALLOW_FROM:-}" ]]; then
+    run ufw allow from "$SSH_ALLOW_FROM" to any port 22 proto tcp \
+      || { warn "Не удалось ограничить SSH адресом ${SSH_ALLOW_FROM} — открываю порт для всех."
+           run ufw allow OpenSSH || run ufw allow 22/tcp || true; }
+    ok "SSH открыт только с ${SSH_ALLOW_FROM}"
+  else
+    run ufw allow OpenSSH || run ufw allow 22/tcp || true
+  fi
   if [[ "$WEB_SERVER" == "nginx" ]]; then
     run ufw allow 'Nginx Full' || run ufw allow 80,443/tcp || true
   else
     run ufw allow 'Apache Full' || run ufw allow 80,443/tcp || true
   fi
   run ufw --force enable
-  ok "UFW включён (открыты 22, 80, 443)"
+  if [[ -n "${SSH_ALLOW_FROM:-}" ]]; then
+    ok "UFW включён (80, 443 для всех; 22 только с ${SSH_ALLOW_FROM})"
+  else
+    ok "UFW включён (открыты 22, 80, 443)"
+  fi
 
   local access_log
   if [[ "$WEB_SERVER" == "nginx" ]]; then
@@ -186,6 +197,15 @@ phpMyAdmin ............... $( [[ "$INSTALL_PMA" == "yes" ]] && echo "${WP_URL_SC
 SSL ...................... $( [[ "$INSTALL_SSL" == "yes" ]] && echo "Let's Encrypt, автопродление включено" || echo "не настроен" )
 Брандмауэр ............... $( [[ "$INSTALL_FIREWALL" == "yes" ]] && echo "UFW + fail2ban" || echo "не настроен" )
 
+Устойчивость:
+  Воркеров PHP-FPM ....... ${FPM_MAX_CHILDREN:-по объёму памяти}
+  Обрыв запроса PHP ...... ${FPM_TIMEOUT:-$(( ${MAX_EXEC_TIME:-300} + 30 ))} c
+  Обрыв тяжёлого SQL ..... ${DB_MAX_STATEMENT_TIME:-30} c
+  Лимит на поиск ......... ${SEARCH_RATE:-20r/m}
+  Кэш страниц ............ $( [[ "${INSTALL_CACHE}" == "yes" ]] && echo "fastcgi_cache" || echo "не настроен" )
+  Свои правила сервера ... ${EXTRA_DIR:-не настроены}
+  Проверка состояния ..... wp-autoinstall-check ${SITE_DOMAIN}
+
 Параметры PHP:
   upload_max_filesize .... ${UPLOAD_MAX}
   post_max_size .......... $(double_size "$UPLOAD_MAX")
@@ -215,6 +235,7 @@ print_summary() {
   printf '  Каталог сайта ... %s\n' "$WP_PATH"
   printf '  Доступы ......... %s\n' "$CRED_FILE"
   printf '  Журнал .......... %s\n' "$LOG_FILE"
+  [[ -n "${SAVE_CONFIG:-}" ]] && printf '  Параметры ....... %s\n' "$SAVE_CONFIG"
   if is_ip "$SITE_DOMAIN"; then
     printf '\n  %sПодсказка:%s сайт работает по IP. Когда направите домен на этот\n' "$C_YELLOW" "$C_RESET"
     printf '  сервер, перезапустите скрипт с --domain ВАШ.ДОМЕН --ssl\n'

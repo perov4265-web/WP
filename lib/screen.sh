@@ -173,7 +173,6 @@ progress_next() {
   PROGRESS_CUR=$(( PROGRESS_CUR + 1 ))
   (( PROGRESS_CUR > PROGRESS_TOTAL )) && PROGRESS_TOTAL="$PROGRESS_CUR"
   screen_draw_progress
-  screen_status "…"
 }
 
 # Временно освободить экран (интерактивный вопрос, вывод ошибки)

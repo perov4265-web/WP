@@ -43,12 +43,34 @@ actcheckbox=white,blue
   fi
 }
 
+# Высота окна по количеству строк текста, но не больше высоты терминала
+_ui_height() {
+  local text="$1" extra="${2:-8}" lines rows h
+  lines="$(printf '%s\n' "$text" | wc -l)"
+  rows="$( (tput lines 2>/dev/null || echo 24) )"
+  h=$(( lines + extra ))
+  (( h > rows - 2 )) && h=$(( rows - 2 ))
+  (( h < 8 )) && h=8
+  printf '%s' "$h"
+}
+
+# Нужна ли прокрутка (текст не помещается целиком)
+_ui_scroll() {
+  local text="$1" extra="${2:-8}" lines rows
+  lines="$(printf '%s\n' "$text" | wc -l)"
+  rows="$( (tput lines 2>/dev/null || echo 24) )"
+  (( lines + extra > rows - 2 ))
+}
+
 ui_cancelled() { die "Установка отменена пользователем."; }
 
 # ---------------------------------------------------------------- сообщения
 ui_msg() { # ui_msg "текст"
   if [[ "$UI_MODE" == "tui" ]]; then
-    "$DIALOG_BIN" --title "$UI_TITLE" --msgbox "$1" 20 76 3>&1 1>&2 2>&3 || true
+    local h scroll=()
+    h="$(_ui_height "$1" 7)"
+    _ui_scroll "$1" 7 && scroll=(--scrolltext)
+    "$DIALOG_BIN" --title "$UI_TITLE" "${scroll[@]}" --msgbox "$1" "$h" 76 3>&1 1>&2 2>&3 || true
   else
     printf '\n%s\n' "$1"
   fi
@@ -69,8 +91,11 @@ SSL-сертификат Let's Encrypt, брандмауэр UFW и fail2ban.
 Сейчас будет задано несколько вопросов о параметрах сайта.
 Пустой ответ = значение по умолчанию."
   if [[ "$UI_MODE" == "tui" ]]; then
-    "$DIALOG_BIN" --title "$UI_TITLE" --yes-button "Продолжить" --no-button "Выход" \
-      --yesno "$text" 22 74 3>&1 1>&2 2>&3 || ui_cancelled
+    local h scroll=()
+    h="$(_ui_height "$text" 6)"
+    _ui_scroll "$text" 6 && scroll=(--scrolltext)
+    "$DIALOG_BIN" --title "$UI_TITLE" --yes-button "Продолжить" --no-button "Выход" "${scroll[@]}" \
+      --yesno "$text" "$h" 74 3>&1 1>&2 2>&3 || ui_cancelled
   else
     printf '\n%s%s%s\n%s\n' "$C_BOLD" "$UI_TITLE" "$C_RESET" "$text"
   fi
@@ -157,7 +182,15 @@ ui_menu() {
   local current="${!__name-}"
   [[ -n "$current" ]] && def="$current"
 
-  if [[ "$ASSUME_YES" == "1" ]]; then printf -v "$__name" '%s' "$def"; return 0; fi
+  if [[ "$ASSUME_YES" == "1" ]]; then
+    local msg
+    if [[ -n "$validator" ]] && declare -F "$validator" >/dev/null; then
+      if ! msg="$("$validator" "$def")"; then
+        die "Значение ${__name}='${def}' не проходит проверку: ${msg:-некорректное значение}"
+      fi
+    fi
+    printf -v "$__name" '%s' "$def"; return 0
+  fi
 
   local -a values=() labels=()
   local pair
@@ -201,14 +234,15 @@ ui_menu() {
   done
 }
 
-# ui_checklist "Вопрос" "ПЕРЕМЕННАЯ|подпись|on|off" ...
+# ui_checklist "Вопрос" "ПЕРЕМЕННАЯ|Тег|Описание|on|off" ...
+# Тег — короткое имя пункта, которое видит пользователь; переменная получает yes/no.
 ui_checklist() {
   local prompt="$1"; shift
-  local -a names=() labels=() states=()
-  local pair name
+  local -a names=() tags=() labels=() states=()
+  local pair name tag label state
   for pair in "$@"; do
-    IFS='|' read -r name label state <<< "$pair"
-    names+=("$name"); labels+=("$label"); states+=("$state")
+    IFS='|' read -r name tag label state <<< "$pair"
+    names+=("$name"); tags+=("$tag"); labels+=("$label"); states+=("$state")
   done
 
   if [[ "$UI_MODE" != "tui" ]]; then
@@ -223,13 +257,16 @@ ui_checklist() {
   local -a items=()
   local i
   for i in "${!names[@]}"; do
-    items+=("${names[$i]}" "${labels[$i]}" "${states[$i]}")
+    items+=("${tags[$i]}" "${labels[$i]}" "${states[$i]}")
   done
+
   local selected
-  selected="$("$DIALOG_BIN" --title "$UI_TITLE" \
-    --checklist "${prompt}\n(пробел — отметить, Tab — к кнопкам)" 16 74 "${#names[@]}" "${items[@]}" 3>&1 1>&2 2>&3)" || ui_cancelled
+  selected="$("$DIALOG_BIN" --title "$UI_TITLE" --separate-output \
+    --checklist "${prompt}\n(пробел — отметить или снять, Tab — перейти к кнопкам)" \
+    $(( ${#names[@]} + 9 )) 78 "${#names[@]}" "${items[@]}" 3>&1 1>&2 2>&3)" || ui_cancelled
+
   for i in "${!names[@]}"; do
-    if [[ " $selected " == *"\"${names[$i]}\""* ]] || [[ " $selected " == *" ${names[$i]} "* ]]; then
+    if printf '%s\n' "$selected" | grep -qxF "${tags[$i]}"; then
       printf -v "${names[$i]}" '%s' yes
     else
       printf -v "${names[$i]}" '%s' no
@@ -241,8 +278,11 @@ ui_checklist() {
 ui_confirm_summary() {
   local text="$1"
   if [[ "$UI_MODE" == "tui" ]]; then
-    "$DIALOG_BIN" --title "$UI_TITLE" --yes-button "Установить" --no-button "Отмена" \
-      --yesno "$text" 24 76 3>&1 1>&2 2>&3 || ui_cancelled
+    local h scroll=()
+    h="$(_ui_height "$text" 9)"
+    _ui_scroll "$text" 9 && scroll=(--scrolltext)
+    "$DIALOG_BIN" --title "$UI_TITLE" --yes-button "Установить" --no-button "Отмена" "${scroll[@]}" \
+      --yesno "$text" "$h" 76 3>&1 1>&2 2>&3 || ui_cancelled
   else
     printf '\n%s\n' "$text"
     [[ "$ASSUME_YES" == "1" ]] && return 0

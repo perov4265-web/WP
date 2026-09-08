@@ -118,6 +118,10 @@ install_php_packages() {
     prefix="php${PHP_VERSION}"
     if ! apt_candidate_exists "${prefix}-fpm"; then
       warn "PHP ${PHP_VERSION} отсутствует в подключённых репозиториях."
+      if [[ "${OS_ID}" == "debian" ]]; then
+        warn "На Debian конкретные версии PHP живут в стороннем репозитории deb.sury.org."
+        warn "Подключается он вручную; сейчас ставим версию из репозитория системы."
+      fi
       if [[ "${OS_ID}" == "ubuntu" ]]; then
         if [[ "${ASSUME_YES}" == "1" ]] || confirm "Подключить репозиторий ppa:ondrej/php, чтобы получить PHP ${PHP_VERSION}?" "yes"; then
           apt_install software-properties-common

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034  # переменные используются в подключаемых модулях
 #
-# wp-autoinstall — установка WordPress на Ubuntu одной командой.
+# wp-autoinstall — установка WordPress на Ubuntu и Debian одной командой.
 #
 #   git clone https://github.com/<user>/wp-autoinstall.git
-#   cd wp-autoinstall
+#   cd WP
 #   sudo ./install.sh
 #
 # Скрипт спросит параметры сайта (домен, название, базу данных, пароли, email),
@@ -14,7 +14,7 @@
 #
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.4.1"
 
 # Рамки и выравнивание требуют UTF-8: если локаль не юникодная, переключаемся на
 # C.UTF-8 (есть в любой Ubuntu) — иначе кириллица считается по байтам и «едет».
@@ -33,6 +33,9 @@ VERBOSE="${VERBOSE:-0}"
 FORCE="${FORCE:-0}"
 UI_MODE="${UI_MODE:-auto}"
 PLAIN_OUTPUT="${PLAIN_OUTPUT:-0}"
+SKIP_OS_CHECK="${SKIP_OS_CHECK:-0}"
+CONFIGURE_ONLY="${CONFIGURE_ONLY:-0}"
+SAVE_CONFIG="${SAVE_CONFIG:-}"
 LOG_FILE="${LOG_FILE:-/var/log/wp-autoinstall.log}"
 
 SITE_DOMAIN="${SITE_DOMAIN:-}"
@@ -58,10 +61,23 @@ MAX_EXEC_TIME="${MAX_EXEC_TIME:-}"
 INSTALL_PMA="${INSTALL_PMA:-}"
 INSTALL_SSL="${INSTALL_SSL:-}"
 INSTALL_FIREWALL="${INSTALL_FIREWALL:-}"
+INSTALL_CACHE="${INSTALL_CACHE:-}"
+SETUP_SWAP="${SETUP_SWAP:-}"
+SWAP_SIZE="${SWAP_SIZE:-2G}"
+CREATE_ROBOTS="${CREATE_ROBOTS:-yes}"
+WP_DEBUG_MODE="${WP_DEBUG_MODE:-no}"
+SEARCH_RATE="${SEARCH_RATE:-20r/m}"
+SSH_ALLOW_FROM="${SSH_ALLOW_FROM:-}"
+NGINX_EXTRA_CONF="${NGINX_EXTRA_CONF:-}"
+FPM_MAX_CHILDREN="${FPM_MAX_CHILDREN:-}"
+FPM_TIMEOUT="${FPM_TIMEOUT:-}"
+DB_MAX_STATEMENT_TIME="${DB_MAX_STATEMENT_TIME:-30}"
+DB_BUFFER_POOL_MB="${DB_BUFFER_POOL_MB:-}"
+EXTRA_DIR=""
 WP_CLI_OK=0
 CRED_FILE=""
 
-for f in common.sh screen.sh ui.sh prompts.sh packages.sh database.sh wordpress.sh webserver.sh extras.sh; do
+for f in common.sh screen.sh ui.sh prompts.sh packages.sh database.sh wordpress.sh webserver.sh tuning.sh extras.sh; do
   [[ -r "${LIB_DIR}/${f}" ]] || { echo "Не найден модуль ${LIB_DIR}/${f}" >&2; exit 1; }
   # shellcheck source=/dev/null
   # shellcheck disable=SC1090,SC1091
@@ -81,8 +97,13 @@ build_screen_lines() {
   [[ "$INSTALL_PMA" == "yes" ]] && extras+=("phpMyAdmin")
   [[ "$INSTALL_SSL" == "yes" ]] && extras+=("SSL")
   [[ "$INSTALL_FIREWALL" == "yes" ]] && extras+=("UFW+fail2ban")
-  local extras_str="нет"
-  [[ ${#extras[@]} -gt 0 ]] && extras_str="$(IFS=', '; echo "${extras[*]}")"
+  [[ "$INSTALL_CACHE" == "yes" ]] && extras+=("кэш")
+  [[ "$SETUP_SWAP" == "yes" ]] && extras+=("swap")
+  local extras_str="нет" i
+  if [[ ${#extras[@]} -gt 0 ]]; then
+    extras_str="${extras[0]}"
+    for (( i = 1; i < ${#extras[@]}; i++ )); do extras_str+=", ${extras[$i]}"; done
+  fi
 
   printf 'Сайт            %s\n' "$SITE_DOMAIN"
   printf 'Название        %s\n' "$SITE_TITLE"
@@ -94,31 +115,62 @@ build_screen_lines() {
   printf 'PHP             upload %s · vars %s · memory %s · exec %s c\n' \
     "$UPLOAD_MAX" "$MAX_INPUT_VARS" "$PHP_MEMORY_LIMIT" "$MAX_EXEC_TIME"
   printf 'Компоненты      %s\n' "$extras_str"
+  printf 'Ресурсы         %s МБ RAM · %s ядер\n' "$RAM_MB" "$CPU_CORES"
   printf 'Журнал          %s\n' "$LOG_FILE"
 }
 
 # Число этапов = число вызовов info() в ходе установки
 count_phases() {
-  local n=11
+  local n=13
+  [[ "$SETUP_SWAP" == "yes" ]] && n=$(( n + 1 ))
   [[ "$INSTALL_PMA" == "yes" ]] && n=$(( n + 1 ))
   [[ "$INSTALL_SSL" == "yes" ]] && n=$(( n + 1 ))
   [[ "$INSTALL_FIREWALL" == "yes" ]] && n=$(( n + 1 ))
   printf '%s' "$n"
 }
 
+# Режим --configure: только мастер и запись файла параметров, без установки
+configure_only() {
+  init_log
+  printf '\n%s wp-autoinstall v%s — настройка параметров %s\n' "$C_BOLD" "$VERSION" "$C_RESET"
+  detect_resources
+  load_config
+  ui_init
+  collect_params
+  validate_tuning_params
+
+  SAVE_CONFIG="${SAVE_CONFIG:-${SCRIPT_DIR}/wp-${SITE_DOMAIN}.conf}"
+  save_config_file "$SAVE_CONFIG"
+
+  printf '\n%sФайл параметров готов.%s\n\n' "$C_GREEN$C_BOLD" "$C_RESET"
+  printf '  Установить с этими параметрами:\n'
+  printf '    %ssudo %s -c %s --yes%s\n\n' "$C_BOLD" "$0" "$SAVE_CONFIG" "$C_RESET"
+  printf '  Поменять параметры ещё раз (значения подставятся как ответы по умолчанию):\n'
+  printf '    %ssudo %s --configure %s%s\n\n' "$C_BOLD" "$0" "$SAVE_CONFIG" "$C_RESET"
+  exit 0
+}
+
 main() {
   parse_args "$@"
+
+  if [[ "$CONFIGURE_ONLY" == "1" ]]; then
+    configure_only
+  fi
+
   require_root
   init_log
   log "wp-autoinstall v${VERSION}"
 
   printf '\n%s wp-autoinstall v%s %s\n' "$C_BOLD" "$VERSION" "$C_RESET"
   check_os
+  detect_resources
   load_config
   ui_init
 
   collect_params
+  validate_tuning_params
   confirm_params
+  maybe_save_config
 
   # С этого места экран не прокручивается: параметры остаются в рамке сверху,
   # снизу обновляются прогресс-бар и строка пояснений.
@@ -126,10 +178,13 @@ main() {
   mapfile -t screen_lines < <(build_screen_lines)
   screen_start "$(count_phases)" "${screen_lines[@]}" || true
 
+  setup_swap
   install_base_packages
   detect_php
   configure_php
+  tune_php_fpm
   setup_database
+  tune_database
 
   install_wp_cli
   download_wordpress
@@ -141,11 +196,13 @@ main() {
 
   setup_ssl
   setup_firewall
+  write_robots
   harden_permissions
 
-  screen_finish
   save_credentials
+  screen_finish
   print_summary
+  run_healthcheck
 }
 
 main "$@"

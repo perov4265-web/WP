@@ -82,6 +82,14 @@ if command -v a2dissite >/dev/null 2>&1; then a2dissite "${SITE_DOMAIN}.conf" >/
 rm -f "/etc/apache2/sites-available/${SITE_DOMAIN}.conf"
 if command -v apache2ctl >/dev/null 2>&1 && apache2ctl configtest >/dev/null 2>&1; then systemctl reload apache2 || true; fi
 rm -f "/etc/fail2ban/jail.d/wp-autoinstall.local"
+for d in "/etc/nginx/wp-autoinstall/${SITE_DOMAIN}.d" "/etc/apache2/wp-autoinstall/${SITE_DOMAIN}.d"; do
+  if [[ -d "$d" ]]; then
+    BAKD="/root/backup-rules-${SITE_DOMAIN}-$(date +%Y%m%d%H%M%S)"
+    mkdir -p "$BAKD" && cp -a "$d"/. "$BAKD"/ 2>/dev/null || true
+    rm -rf "$d"
+    ok "Свои правила сервера сохранены в ${BAKD} и удалены"
+  fi
+done
 ok "Конфигурация веб-сервера удалена"
 
 if [[ "$KEEP_DB" == "no" && ( -n "$DB_NAME" || -n "$DB_USER" ) ]]; then

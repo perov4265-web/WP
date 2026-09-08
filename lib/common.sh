@@ -83,20 +83,34 @@ require_root() {
 require_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 check_os() {
-  [[ -r /etc/os-release ]] || die "Не найден /etc/os-release — система не поддерживается."
-  # shellcheck disable=SC1091
-  . /etc/os-release
+  # путь вынесен в переменную, чтобы тесты могли подсунуть свой файл
+  local osr="${OS_RELEASE_FILE:-/etc/os-release}"
+  [[ -r "$osr" ]] || die "Не найден ${osr} — система не поддерживается."
+  # shellcheck disable=SC1090,SC1091
+  . "$osr"
   OS_ID="${ID:-unknown}"
   OS_LIKE="${ID_LIKE:-}"
   OS_VERSION="${VERSION_ID:-неизвестно}"
   OS_CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
-  if [[ "$OS_ID" != "ubuntu" ]]; then
-    if [[ "$OS_LIKE" == *debian* ]]; then
-      warn "Обнаружена $OS_ID $OS_VERSION (Debian-совместимая). Скрипт рассчитан на Ubuntu, продолжаем на свой риск."
-    else
-      die "Поддерживаются только Ubuntu и Debian-совместимые системы (обнаружено: $OS_ID)."
-    fi
-  fi
+  # ВНИМАНИЕ: у самого Debian поля ID_LIKE в /etc/os-release нет — оно есть только
+  # у производных дистрибутивов. Поэтому debian проверяется отдельной веткой.
+  case "$OS_ID" in
+    ubuntu)
+      ;;
+    debian)
+      warn "Debian ${OS_VERSION}. Скрипт рассчитан на Ubuntu, но на Debian работает штатно."
+      ;;
+    *)
+      if [[ "${SKIP_OS_CHECK:-0}" == "1" ]]; then
+        warn "Проверка системы отключена ключом --skip-os-check (обнаружено: $OS_ID $OS_VERSION)."
+      elif [[ "$OS_LIKE" == *debian* || "$OS_LIKE" == *ubuntu* ]]; then
+        warn "Обнаружена $OS_ID $OS_VERSION (Debian-совместимая). Продолжаем на свой риск."
+      else
+        err "Поддерживаются Ubuntu, Debian и производные от них (обнаружено: $OS_ID $OS_VERSION)."
+        die "Если система всё же apt-совместима, запустите с ключом --skip-os-check."
+      fi
+      ;;
+  esac
   require_cmd apt-get || die "Не найден apt-get."
   ok "Система: ${PRETTY_NAME:-$OS_ID $OS_VERSION}"
 }
@@ -188,6 +202,11 @@ _ask() {
 
   if [[ "$ASSUME_YES" == "1" ]]; then
     [[ -n "$def" ]] || die "Параметр $__name не задан, а режим --yes не позволяет спросить."
+    if [[ -n "$validator" ]] && declare -F "$validator" >/dev/null; then
+      if ! msg="$("$validator" "$def")"; then
+        die "Значение ${__name}='${def}' не проходит проверку: ${msg:-некорректное значение}"
+      fi
+    fi
     printf -v "$__name" '%s' "$def"
     return 0
   fi

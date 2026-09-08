@@ -54,11 +54,13 @@ cat > "${MOCK}/mysql" <<'M'
 #!/bin/sh
 for a in "$@"; do
   case "$a" in
+    *VERSION*)     echo "10.11.11-MariaDB-0+deb12u1"; exit 0 ;;
     *SCHEMA_NAME*) exit 0 ;;   # база не существует
   esac
 done
 exit 0
 M
+printf '#!/bin/sh\nexit 0\n' > "${MOCK}/php-fpm${PHPV}"
 cat > "${MOCK}/mysqldump" <<'M'
 #!/bin/sh
 echo "-- dump"
@@ -114,10 +116,26 @@ M
 sed -i "s/__PHPV__/${PHPV}/" "${MOCK}/systemctl"
 chmod +x "${MOCK}"/*
 
+# пользователь веб-сервера может отсутствовать на голой машине (например, в CI)
+id www-data >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin www-data
+
 # ------------------------------------------------- окружение, как после apt
 mkdir -p "/etc/php/${PHPV}/fpm/conf.d" "/etc/php/${PHPV}/fpm/pool.d" "/etc/php/${PHPV}/cli/conf.d"
-printf 'listen = /run/php/php%s-fpm.sock\n' "$PHPV" > "/etc/php/${PHPV}/fpm/pool.d/www.conf"
-mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /var/log/nginx
+cat > "/etc/php/${PHPV}/fpm/pool.d/www.conf" <<POOL
+[www]
+user = www-data
+group = www-data
+listen = /run/php/php${PHPV}-fpm.sock
+pm = dynamic
+pm.max_children = 5
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+;request_terminate_timeout = 0
+;slowlog = /var/log/\$pool.log.slow
+POOL
+mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/conf.d /var/log/nginx
+mkdir -p /etc/mysql/mariadb.conf.d /var/log/mysql
 
 cat > "${TMP}/test.conf" <<CFG
 SITE_DOMAIN=test.example.com
@@ -141,6 +159,11 @@ MAX_EXEC_TIME=600
 INSTALL_PMA=yes
 INSTALL_SSL=no
 INSTALL_FIREWALL=no
+INSTALL_CACHE=yes
+SETUP_SWAP=no
+CREATE_ROBOTS=yes
+DB_MAX_STATEMENT_TIME=30
+SEARCH_RATE=20r/m
 CFG
 
 printf '\n\033[1mПрогон install.sh с заглушками\033[0m\n'
@@ -178,7 +201,11 @@ check "nginx: сокет PHP-FPM"           "$NG" "fastcgi_pass unix:/run/php/ph
 check "nginx: блок phpMyAdmin"         "$NG" "location ^~ /phpmyadmin/"
 check "nginx: плейсхолдеры заменены"   "$NG" "index index.php"
 if grep -q "__" "$NG"; then fail "nginx: в конфиге остались плейсхолдеры __XXX__"; else pass "nginx: плейсхолдеров не осталось"; fi
-[[ -L "/etc/nginx/sites-enabled/test.example.com.conf" ]] && pass "nginx: сайт включён (симлинк)" || fail "nginx: симлинк не создан"
+if [[ -L "/etc/nginx/sites-enabled/test.example.com.conf" ]]; then
+  pass "nginx: сайт включён (симлинк)"
+else
+  fail "nginx: симлинк не создан"
+fi
 
 CRED="/root/wp-test.example.com-credentials.txt"
 check "файл доступов: пароль админа"   "$CRED" "SuperSecret123"
@@ -212,6 +239,73 @@ check "apache: AllowOverride All"      "$AP" "AllowOverride All"
 check "apache: alias phpMyAdmin"       "$AP" "Alias /phpmyadmin /usr/share/phpmyadmin"
 [[ -f "${TMP}/site-apache/.htaccess" ]] && pass "apache: .htaccess создан" || fail "apache: нет .htaccess"
 
+# ================================ устойчивость под нагрузкой (тюнинг)
+printf '\n\033[1mТюнинг под нагрузкой\033[0m\n'
+
+POOL="/etc/php/${PHPV}/fpm/pool.d/www.conf"
+if grep -qE '^pm\.max_children = [0-9]+' "$POOL"; then
+  CH=$(grep -oP '^pm\.max_children = \K[0-9]+' "$POOL")
+  if (( CH >= 5 )); then pass "PHP-FPM: воркеров ${CH} (было 5 по умолчанию)"
+  else fail "PHP-FPM: воркеров ${CH} — меньше минимума"; fi
+else
+  fail "PHP-FPM: pm.max_children не выставлен"
+fi
+check "PHP-FPM: обрыв зависшего запроса" "$POOL" "request_terminate_timeout ="
+check "PHP-FPM: журнал медленных"        "$POOL" "request_slowlog_timeout = 5s"
+check "PHP-FPM: slowlog"                 "$POOL" "slowlog = /var/log/php${PHPV}-fpm-slow.log"
+if grep -qE '^pm\.max_spare_servers' "$POOL"; then
+  SP=$(grep -oP '^pm\.max_spare_servers = \K[0-9]+' "$POOL")
+  CH=$(grep -oP '^pm\.max_children = \K[0-9]+' "$POOL")
+  (( SP <= CH )) && pass "PHP-FPM: max_spare_servers не больше max_children" \
+                 || fail "PHP-FPM: max_spare_servers ${SP} > max_children ${CH}"
+fi
+
+DBCNF="/etc/mysql/mariadb.conf.d/99-wp-autoinstall.cnf"
+check "СУБД: обрыв тяжёлого запроса (MariaDB)" "$DBCNF" "max_statement_time = 30"
+check "СУБД: размер буфера"                    "$DBCNF" "innodb_buffer_pool_size ="
+check "СУБД: журнал медленных запросов"        "$DBCNF" "slow_query_log = 1"
+
+GLOB="/etc/nginx/conf.d/00-wp-autoinstall.conf"
+check "nginx: формат лога со временем ответа" "$GLOB" "log_format wp_timed"
+check "nginx: зона лимита поиска"             "$GLOB" "limit_req_zone \$wp_search_key zone=wpsearch"
+check "nginx: ключ зоны пуст вне поиска"      "$GLOB" 'default        "";'
+check "nginx: зона кэша страниц"              "$GLOB" "fastcgi_cache_path /var/cache/nginx/wp"
+
+NG="/etc/nginx/sites-available/test.example.com.conf"
+check "nginx: лимит применён к поиску"   "$NG" "limit_req zone=wpsearch"
+check "nginx: лог с wp_timed"            "$NG" "access.log wp_timed"
+check "nginx: подключение своих правил"  "$NG" "include /etc/nginx/wp-autoinstall/test.example.com.d/*.conf;"
+check "nginx: кэш включён в php-локации" "$NG" "fastcgi_cache WPCACHE;"
+check "nginx: кэш обходит админку"       "$NG" "set \$skip_cache 1;"
+check "nginx: заголовок статуса кэша"    "$NG" "X-FastCGI-Cache"
+[[ -d "/etc/nginx/wp-autoinstall/test.example.com.d" ]] && pass "nginx: каталог своих правил создан" || fail "nginx: каталога своих правил нет"
+
+ROB="${WPDIR}/robots.txt"
+check "robots.txt: поиск закрыт"       "$ROB" "Disallow: /*?s="
+check "robots.txt: админка закрыта"    "$ROB" "Disallow: /wp-admin/"
+check "robots.txt: admin-ajax разрешён" "$ROB" "Allow: /wp-admin/admin-ajax.php"
+
+[[ -x /usr/local/bin/wp-autoinstall-check ]] && pass "команда проверки установлена" || fail "команды проверки нет"
+check "файл доступов: раздел устойчивости" "$CRED" "Обрыв тяжёлого SQL"
+
+# свой файл правил через --extra-conf
+EXTRA_SRC="${TMP}/legacy.conf"
+printf 'location ^~ /search/ { return 410; }\n' > "$EXTRA_SRC"
+sed -e 's/^SITE_DOMAIN=.*/SITE_DOMAIN=legacy.example.com/' \
+    -e "s#^WP_PATH=.*#WP_PATH=${TMP}/site-legacy#" "${TMP}/test.conf" > "${TMP}/test-legacy.conf"
+PATH="${MOCK}:${PATH}" LOG_FILE="${TMP}/legacy.log" \
+  bash "${ROOT}/install.sh" -c "${TMP}/test-legacy.conf" -y --force --extra-conf "$EXTRA_SRC" \
+  > "${TMP}/legacy-out.txt" 2>&1 || true
+if [[ -f /etc/nginx/wp-autoinstall/legacy.example.com.d/50-custom.conf ]]; then
+  pass "--extra-conf: свои правила скопированы"
+else
+  fail "--extra-conf: правила не скопированы"
+fi
+
+# после установки ВТОРОГО сайта log_format должен остаться — на него ссылаются
+# vhost'ы обоих сайтов, без него nginx не стартует
+check "второй сайт: log_format не потерялся" "$GLOB" "log_format wp_timed"
+
 # ======================================= экран установки (нужен псевдотерминал)
 if command -v script >/dev/null 2>&1; then
   printf '\n\033[1mПроверка экрана установки\033[0m\n'
@@ -242,6 +336,112 @@ if command -v script >/dev/null 2>&1; then
 else
   printf '\n  (пропуск проверки экрана: нет команды script)\n'
 fi
+
+# ================================ проверка недопустимых значений
+printf '\n\033[1mПроверка значений параметров\033[0m\n'
+
+bad_value() { # bad_value ОПИСАНИЕ КЛЮЧ ЗНАЧЕНИЕ ОЖИДАЕМЫЙ_КУСОК_ОШИБКИ
+  local out
+  out="$(PATH="${MOCK}:${PATH}" LOG_FILE="${TMP}/bad.log" \
+        bash "${ROOT}/install.sh" -c "${TMP}/test.conf" -y --force "$2" "$3" 2>&1 || true)"
+  if grep -qF "$4" <<< "$out"; then
+    pass "$1"
+  else
+    fail "$1"; echo "$out" | tail -3
+  fi
+}
+
+bad_value "мусор в --search-rate отклонён"   --search-rate  "быстро"  "Неверный формат"
+bad_value "мусор в --swap-size отклонён"     --swap-size    "много"   "Неверный размер файла подкачки"
+bad_value "ноль воркеров отклонён"           --fpm-children "0"       "Нужно целое число не меньше 2"
+bad_value "буквы в --db-time отклонены"      --db-time      "тридцать" "Нужно число секунд"
+bad_value "не-IP в --ssh-from отклонён"      --ssh-from     "мой-дом"  "Ожидается IPv4"
+bad_value "отсутствующий --extra-conf отклонён" --extra-conf "/нет/такого.conf" "не найден"
+
+# ключ командной строки должен быть важнее файла параметров
+PREC="${TMP}/precedence.conf"
+sed -e 's/^SITE_DOMAIN=.*/SITE_DOMAIN=prec.example.com/' \
+    -e "s#^WP_PATH=.*#WP_PATH=${TMP}/site-prec#" \
+    -e 's/^UPLOAD_MAX=.*/UPLOAD_MAX=8M/' \
+    -e 's/^INSTALL_CACHE=.*/INSTALL_CACHE=yes/' "${TMP}/test.conf" > "$PREC"
+PATH="${MOCK}:${PATH}" LOG_FILE="${TMP}/prec.log" \
+  bash "${ROOT}/install.sh" -c "$PREC" -y --force --upload-max 512M --no-cache \
+  > "${TMP}/prec-out.txt" 2>&1 || true
+PRECINI="/etc/php/${PHPV}/fpm/conf.d/99-wordpress.ini"
+check "ключ важнее файла: upload_max_filesize" "$PRECINI" "upload_max_filesize = 512M"
+if grep -q "fastcgi_cache WPCACHE" /etc/nginx/sites-available/prec.example.com.conf 2>/dev/null; then
+  fail "ключ важнее файла: --no-cache проигнорирован"
+else
+  pass "ключ важнее файла: --no-cache сработал"
+fi
+
+# ============================== файл параметров и определение дистрибутива
+printf '\n\033[1mФайл параметров и определение системы\033[0m\n'
+
+CFG_OUT="${TMP}/saved.conf"
+if PATH="${MOCK}:${PATH}" LOG_FILE="${TMP}/configure.log" \
+   bash "${ROOT}/install.sh" --configure "$CFG_OUT" -y --no-tui > "${TMP}/configure-out.txt" 2>&1; then
+  pass "--configure отработал без установки"
+else
+  fail "--configure завершился с ошибкой"; tail -n 10 "${TMP}/configure-out.txt"
+fi
+[[ -f "$CFG_OUT" ]] && pass "файл параметров создан" || fail "файла параметров нет"
+[[ "$(stat -c %a "$CFG_OUT" 2>/dev/null)" == "600" ]] && pass "файл параметров: права 600" || fail "файл параметров: неверные права"
+check "файл параметров: домен"        "$CFG_OUT" "SITE_DOMAIN="
+check "файл параметров: пароль админа" "$CFG_OUT" "WP_ADMIN_PASS="
+check "файл параметров: лимиты PHP"    "$CFG_OUT" "MAX_INPUT_VARS="
+check "файл параметров: подсказка"     "$CFG_OUT" "--configure"
+if grep -q "wp-includes" "${TMP}/site-configure" 2>/dev/null; then
+  fail "--configure не должен ничего устанавливать"
+else
+  pass "--configure ничего не установил"
+fi
+
+# правка существующего файла: меняем одно значение, остальные должны уцелеть
+CFG_EDIT="${TMP}/edited.conf"
+cp "$CFG_OUT" "$CFG_EDIT"
+sed -i 's/^SITE_TITLE=.*/SITE_TITLE="Было"/' "$CFG_EDIT"
+ORIG_PASS="$(grep '^DB_PASS=' "$CFG_EDIT")"
+# ввод: Enter на домене, новое название, дальше Enter на всё остальное
+# (без yes|head — они дают SIGPIPE и роняют тест целиком)
+{ printf '\n'; printf 'Стало\n'; printf '\n%.0s' $(seq 1 40); } \
+  | PATH="${MOCK}:${PATH}" LOG_FILE="${TMP}/edit.log" \
+    bash "${ROOT}/install.sh" --configure "$CFG_EDIT" --no-tui > "${TMP}/edit-out.txt" 2>&1 || true
+check "правка конфига: новое значение записано" "$CFG_EDIT" 'SITE_TITLE="Стало"'
+if grep -qxF "$ORIG_PASS" "$CFG_EDIT"; then pass "правка конфига: пароль БД не потерялся"; else fail "правка конфига: пароль БД изменился"; fi
+
+# --save-config при обычной установке
+SAVED2="${TMP}/from-install.conf"
+sed -e 's/^SITE_DOMAIN=.*/SITE_DOMAIN=save.example.com/' \
+    -e "s#^WP_PATH=.*#WP_PATH=${TMP}/site-save#" "${TMP}/test.conf" > "${TMP}/test-save.conf"
+PATH="${MOCK}:${PATH}" LOG_FILE="${TMP}/save.log" \
+  bash "${ROOT}/install.sh" -c "${TMP}/test-save.conf" -y --force --save-config "$SAVED2" \
+  > "${TMP}/save-out.txt" 2>&1 || true
+[[ -f "$SAVED2" ]] && pass "--save-config записал файл при установке" || fail "--save-config не сработал"
+check "--save-config: домен из установки" "$SAVED2" 'SITE_DOMAIN="save.example.com"'
+
+# определение дистрибутива по подсунутому os-release
+os_case() { # os_case ФАЙЛ ОЖИДАНИЕ ОПИСАНИЕ
+  local out
+  out="$(OS_RELEASE_FILE="$1" LOG_FILE="${TMP}/os.log" bash -c '
+    set -euo pipefail
+    source '"${ROOT}"'/lib/common.sh
+    source '"${ROOT}"'/lib/screen.sh
+    init_log; check_os' 2>&1 || true)"
+  if [[ "$2" == "ok" ]]; then
+    grep -q "Система:" <<< "$out" && pass "$3" || { fail "$3"; echo "$out" | head -3; }
+  else
+    grep -q "Поддерживаются" <<< "$out" && pass "$3" || { fail "$3"; echo "$out" | head -3; }
+  fi
+}
+printf 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nID=debian\nVERSION_ID="12"\n' > "${TMP}/os-debian12"
+printf 'PRETTY_NAME="Ubuntu 24.04.4 LTS"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID="24.04"\n' > "${TMP}/os-ubuntu"
+printf 'PRETTY_NAME="Linux Mint 21"\nID=linuxmint\nID_LIKE="ubuntu debian"\nVERSION_ID="21"\n' > "${TMP}/os-mint"
+printf 'PRETTY_NAME="Fedora 40"\nID=fedora\nVERSION_ID="40"\n' > "${TMP}/os-fedora"
+os_case "${TMP}/os-debian12" ok   "Debian 12 (без ID_LIKE) принимается"
+os_case "${TMP}/os-ubuntu"   ok   "Ubuntu принимается"
+os_case "${TMP}/os-mint"     ok   "производные от Ubuntu принимаются"
+os_case "${TMP}/os-fedora"   fail "не-apt система отклоняется"
 
 # ================================================= модульные проверки функций
 printf '\n\033[1mПроверка отдельных функций\033[0m\n'
@@ -285,7 +485,7 @@ printf '\n\033[1mПроверка отдельных функций\033[0m\n'
 
   # свой вариант
   MAX_INPUT_VARS=""
-  ui_menu MAX_INPUT_VARS "Переменные:" "3000" v_int "1000|" "3000|" "5000|" >/dev/null <<< $'4\n7777' 
+  ui_menu MAX_INPUT_VARS "Переменные:" "3000" v_int "1000|" "3000|" "5000|" >/dev/null <<< $'4\n7777'
   [[ "$MAX_INPUT_VARS" == "7777" ]] && pass "меню: свой вариант (7777)" || fail "меню: свой вариант дал «$MAX_INPUT_VARS»"
 
   exit 0

@@ -114,7 +114,19 @@ configure_wordpress() {
     echo "define( 'WP_HOME', '${WP_URL_SCHEME}://${SITE_DOMAIN}' );"
     echo "define( 'WP_SITEURL', '${WP_URL_SCHEME}://${SITE_DOMAIN}' );"
     echo "define( 'WPLANG', '${q_locale}' );"
-    echo "define( 'WP_DEBUG', false );"
+    if [[ "${WP_DEBUG_MODE:-no}" == "yes" ]]; then
+      echo "define( 'WP_DEBUG', true );"
+      echo "define( 'WP_DEBUG_LOG', true );      // журнал: wp-content/debug.log"
+      echo "define( 'WP_DEBUG_DISPLAY', false ); // ошибки не показываем посетителям"
+      echo "@ini_set( 'display_errors', '0' );"
+    else
+      echo "define( 'WP_DEBUG', false );"
+      echo "// Диагностика: раскомментируйте три строки ниже, ошибки лягут"
+      echo "// в wp-content/debug.log и не будут видны посетителям."
+      echo "// define( 'WP_DEBUG', true );"
+      echo "// define( 'WP_DEBUG_LOG', true );"
+      echo "// define( 'WP_DEBUG_DISPLAY', false );"
+    fi
     echo "define( 'FS_METHOD', 'direct' );"
     echo "define( 'WP_MEMORY_LIMIT', '${PHP_MEMORY_LIMIT:-256M}' );"
     echo "define( 'DISALLOW_FILE_EDIT', true );"
@@ -149,9 +161,11 @@ install_wordpress_core() {
     fi
 
     if [[ "$WP_LOCALE" != "en_US" ]]; then
-      wp_cli language core install "$WP_LOCALE" --activate >>"$LOG_FILE" 2>&1 \
-        && ok "Языковой пакет ${WP_LOCALE} установлен" \
-        || warn "Не удалось установить языковой пакет ${WP_LOCALE}."
+      if wp_cli language core install "$WP_LOCALE" --activate >>"$LOG_FILE" 2>&1; then
+        ok "Языковой пакет ${WP_LOCALE} установлен"
+      else
+        warn "Не удалось установить языковой пакет ${WP_LOCALE}."
+      fi
     fi
 
     wp_cli rewrite structure '/%postname%/' >>"$LOG_FILE" 2>&1 || true
