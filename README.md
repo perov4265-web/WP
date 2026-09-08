@@ -1,6 +1,5 @@
 # wp-autoinstall
 
-[![CI](https://github.com/perov4265-web/WP/actions/workflows/ci.yml/badge.svg)]
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Ubuntu 20.04+ / Debian 11+](https://img.shields.io/badge/Ubuntu%2020.04%2B%20%7C%20Debian%2011%2B-supported-success)](#совместимость)
 [![Bash](https://img.shields.io/badge/bash-без%20зависимостей-lightgrey)](#разработка)
