@@ -55,6 +55,40 @@ screen_term_size() {
 
 screen_on() { [[ "$SCREEN_ACTIVE" == "1" ]]; }
 
+# Ядро и генераторы systemd пишут сообщения прямо на консоль, минуя наши
+# перенаправления: swapon печатает "Adding 2097148k swap on /swapfile",
+# systemd-ssh-generator — "Failed to query local AF_VSOCK CID", apparmor —
+# свои предупреждения. На фиксированном экране это выглядит как мусор поверх
+# рамки. На время установки понижаем уровень вывода на консоль и возвращаем
+# прежний в конце.
+PRINTK_SAVED=""
+
+screen_quiet_console() {
+  [[ -w /proc/sys/kernel/printk ]] || return 0
+  PRINTK_SAVED="$(cat /proc/sys/kernel/printk 2>/dev/null || true)"
+  [[ -n "$PRINTK_SAVED" ]] || return 0
+  if printf '1 4 1 7\n' > /proc/sys/kernel/printk 2>/dev/null; then
+    log "[SCRN] уровень вывода ядра на консоль понижен (был: ${PRINTK_SAVED//$'\t'/ })"
+  else
+    PRINTK_SAVED=""
+  fi
+}
+
+screen_restore_console() {
+  [[ -n "${PRINTK_SAVED:-}" ]] || return 0
+  printf '%s\n' "$PRINTK_SAVED" > /proc/sys/kernel/printk 2>/dev/null || true
+  log "[SCRN] уровень вывода ядра на консоль возвращён"
+  PRINTK_SAVED=""
+}
+
+# Курсор паркуется сразу под нашей областью, а всё ниже очищается. Тогда
+# посторонний вывод, если он всё-таки прорвётся, попадает в эту зону и стирается
+# при следующем же обновлении, а не ломает разметку насовсем.
+_park() {
+  screen_on || return 0
+  printf '\033[%d;1H\033[J' "$(( STATUS_ROW + 1 ))"
+}
+
 screen_supported() {
   [[ "${PLAIN_OUTPUT:-0}" != "1" ]] || return 1
   [[ "${VERBOSE:-0}" != "1" ]] || return 1
@@ -117,24 +151,28 @@ screen_draw_progress() {
   printf '  %s%s%s%s%s %3d%%' \
     "$C_GREEN" "$(_rep "$B_FULL" "$filled")" "$C_DIM" \
     "$(_rep "$B_EMPTY" $(( barw - filled )))" "$C_RESET" "$pct"
+  _park
 }
 
 screen_status() { # строка пояснения, всегда на одном и том же месте
   screen_on || return 1
   _at "$STATUS_ROW"
   printf '  %s%s %s%s' "$C_DIM" "$B_ARROW" "$(_fit "$*" $(( SCREEN_W - 4 )))" "$C_RESET"
+  _park
 }
 
 screen_status_ok() {
   screen_on || return 1
   _at "$STATUS_ROW"
   printf '  %s✓%s %s' "$C_GREEN" "$C_RESET" "$(_fit "$*" $(( SCREEN_W - 4 )))"
+  _park
 }
 
 screen_status_warn() {
   screen_on || return 1
   _at "$STATUS_ROW"
   printf '  %s!%s %s' "$C_YELLOW" "$C_RESET" "$(_fit "$*" $(( SCREEN_W - 4 )))"
+  _park
 }
 
 # --------------------------------------------------------------- жизненный цикл
@@ -160,6 +198,7 @@ screen_start() {
   BAR_ROW=$(( PHASE_ROW + 1 ))
   STATUS_ROW=$(( BAR_ROW + 1 ))
 
+  screen_quiet_console
   printf '\033[2J\033[H\033[?25l'          # очистить экран, курсор наверх и спрятать
   screen_draw_box
   screen_draw_progress
@@ -172,6 +211,9 @@ progress_next() {
   PROGRESS_NAME="$1"
   PROGRESS_CUR=$(( PROGRESS_CUR + 1 ))
   (( PROGRESS_CUR > PROGRESS_TOTAL )) && PROGRESS_TOTAL="$PROGRESS_CUR"
+  # рамку рисуем заново: если поверх неё что-то напечаталось или экран
+  # прокрутился, на следующем этапе картинка восстановится сама
+  screen_draw_box
   screen_draw_progress
 }
 
@@ -193,10 +235,13 @@ screen_resume() {
 
 # Вернуть терминал в обычное состояние
 screen_restore() {
+  screen_restore_console
   [[ "$SCREEN_ACTIVE" == "0" ]] && return 0
   local row=$(( STATUS_ROW + 2 ))
   SCREEN_ACTIVE=0
-  printf '\033[?25h\033[%d;1H\n' "$row"
+  # курсор вниз, показать его и очистить остатки, чтобы приглашение оболочки
+  # начиналось с чистой строки
+  printf '\033[?25h\033[%d;1H\033[J\n' "$row"
 }
 
 # Успешное завершение: дорисовать 100 % и освободить экран

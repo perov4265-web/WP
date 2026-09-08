@@ -46,6 +46,9 @@ actcheckbox=white,blue
 # Высота окна по количеству строк текста, но не больше высоты терминала
 _ui_height() {
   local text="$1" extra="${2:-8}" lines rows h
+  # whiptail разворачивает и настоящие переводы строк, и последовательности \n,
+  # поэтому считаем и те и другие — иначе окно окажется ниже своего текста
+  text="${text//\\n/$'\n'}"
   lines="$(printf '%s\n' "$text" | wc -l)"
   rows="$( (tput lines 2>/dev/null || echo 24) )"
   h=$(( lines + extra ))
@@ -57,6 +60,7 @@ _ui_height() {
 # Нужна ли прокрутка (текст не помещается целиком)
 _ui_scroll() {
   local text="$1" extra="${2:-8}" lines rows
+  text="${text//\\n/$'\n'}"
   lines="$(printf '%s\n' "$text" | wc -l)"
   rows="$( (tput lines 2>/dev/null || echo 24) )"
   (( lines + extra > rows - 2 ))
@@ -140,10 +144,21 @@ ui_secret() {
 
   while true; do
     a="$("$DIALOG_BIN" --title "$UI_TITLE" \
-      --passwordbox "${prompt}\n\n(оставьте поле пустым — пароль будет создан автоматически)" 12 74 3>&1 1>&2 2>&3)" || ui_cancelled
+      --passwordbox "${prompt}
+
+(оставьте поле пустым — пароль будет создан автоматически)" 12 74 3>&1 1>&2 2>&3)" || ui_cancelled
     if [[ -z "$a" ]]; then
       a="$(rand_pass 20)"
-      ui_msg "Сгенерирован пароль:\n\n    ${a}\n\nОн будет показан в конце установки и сохранён в файл с доступами."
+      # Переводы строк должны быть настоящими: по ним считается высота окна,
+      # а литеральные \n давали высоту в одну строку и обрезали сам пароль.
+      local shown
+      shown="Пароль создан автоматически:
+
+    ${a}
+
+Запишите его сейчас или найдите потом в файле с доступами —
+скрипт покажет путь к нему в конце установки."
+      ui_msg "$shown"
       printf -v "$__name" '%s' "$a"; return 0
     fi
     if ! msg="$("$validator" "$a")"; then ui_msg "Ошибка: ${msg}"; continue; fi

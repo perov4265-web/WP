@@ -114,6 +114,21 @@ esac
 exit 1
 M
 sed -i "s/__PHPV__/${PHPV}/" "${MOCK}/systemctl"
+
+# отдельная шумная заглушка: пишет в /dev/tty мимо перенаправлений — так ведут
+# себя сообщения ядра (swapon) и генераторов systemd
+mkdir -p "${MOCK}/noisy"
+cat > "${MOCK}/noisy/systemctl" <<'M'
+#!/bin/sh
+printf '[  603.801176] systemd-ssh-generator[2583]: Failed to query local AF_VSOCK CID\n' > /dev/tty 2>/dev/null
+case "$1" in
+  is-active) exit 1 ;;
+  list-unit-files) echo "php-fpm.service enabled"; echo "mariadb.service enabled"; exit 0 ;;
+esac
+exit 0
+M
+sed -i "s/php-fpm.service/php${PHPV}-fpm.service/" "${MOCK}/noisy/systemctl"
+chmod +x "${MOCK}/noisy/systemctl"
 chmod +x "${MOCK}"/*
 
 # пользователь веб-сервера может отсутствовать на голой машине (например, в CI)
@@ -324,6 +339,34 @@ if command -v script >/dev/null 2>&1; then
   if grep -qP '\x1b\[[0-9]+;1H' "$TS"; then pass "экран: вывод на фиксированные строки"; else fail "экран: нет позиционирования курсора"; fi
   if grep -q '100%' "$TS"; then pass "экран: прогресс дошёл до 100%"; else fail "экран: нет 100%"; fi
 
+  # рамка перерисовывается на каждом этапе — иначе посторонний вывод остаётся навсегда
+  REDRAWS=$(grep -o 'Установка WordPress' "$TS" | wc -l)
+  if (( REDRAWS >= 5 )); then
+    pass "экран: рамка перерисовывается (${REDRAWS} раз)"
+  else
+    fail "экран: рамка нарисована всего ${REDRAWS} раз — мусор на ней останется"
+  fi
+  if grep -qP '\x1b\[J' "$TS"; then pass "экран: очистка области под строкой состояния"; else fail "экран: нет очистки под строкой состояния"; fi
+
+  # прогон с посторонним выводом прямо в терминал
+  TS3="${TMP}/typescript-noise"
+  sed -e 's/^SITE_DOMAIN=.*/SITE_DOMAIN=noise.example.com/' \
+      -e "s#^WP_PATH=.*#WP_PATH=${TMP}/site-noise#" "${TMP}/test.conf" > "${TMP}/test-noise.conf"
+  TERM=xterm script -qec \
+    "PATH=${MOCK}/noisy:${MOCK}:\$PATH LOG_FILE=${TMP}/noise.log bash ${ROOT}/install.sh -c ${TMP}/test-noise.conf -y --force" \
+    "$TS3" >/dev/null 2>&1 || true
+  if grep -q 'AF_VSOCK' "$TS3"; then
+    pass "шум с консоли действительно попал в терминал"
+  else
+    fail "шум не воспроизвёлся — проверка бессмысленна"
+  fi
+  NOISE_REDRAWS=$(grep -o 'Установка WordPress' "$TS3" | wc -l)
+  if (( NOISE_REDRAWS >= 5 )); then
+    pass "экран восстанавливается после мусора на консоли"
+  else
+    fail "экран не перерисовался после мусора (${NOISE_REDRAWS})"
+  fi
+
   # --plain обязан отключать экран
   TS2="${TMP}/typescript-plain"
   sed -e 's/^SITE_DOMAIN=.*/SITE_DOMAIN=plain.example.com/' \
@@ -451,6 +494,8 @@ printf '\n\033[1mПроверка отдельных функций\033[0m\n'
   # shellcheck source=/dev/null
   . "${ROOT}/lib/common.sh"
   # shellcheck source=/dev/null
+  . "${ROOT}/lib/screen.sh"
+  # shellcheck source=/dev/null
   . "${ROOT}/lib/ui.sh"
   # shellcheck source=/dev/null
   . "${ROOT}/lib/packages.sh"
@@ -473,6 +518,29 @@ printf '\n\033[1mПроверка отдельных функций\033[0m\n'
   [[ "$(double_size 1G)"   == "2048M" ]] && pass "double_size: 1G -> 2048M" || fail "double_size: неверно (1G)"
   [[ "$(size_to_mb 512M)"  == "512"  ]] && pass "size_to_mb: 512M -> 512"   || fail "size_to_mb: неверно"
 
+  # высота окна должна считаться по числу строк текста: раньше многострочное
+  # сообщение получало высоту в одну строку и обрезалось — пароль не показывался
+  H_ONE="$(_ui_height "одна строка" 7)"
+  H_MANY="$(_ui_height "$(printf 'раз\nдва\nтри\nчетыре\nпять')" 7)"
+  if (( H_MANY > H_ONE )); then
+    pass "высота окна растёт с числом строк (${H_ONE} -> ${H_MANY})"
+  else
+    fail "высота окна не зависит от текста (${H_ONE} / ${H_MANY})"
+  fi
+  H_ESC="$(_ui_height 'раз\nдва\nтри\nчетыре\nпять' 7)"
+  if (( H_ESC == H_MANY )); then
+    pass "последовательности \\n тоже считаются за строки"
+  else
+    fail "литеральные \\n не учитываются в высоте (${H_ESC} против ${H_MANY})"
+  fi
+
+  # понижение уровня вывода ядра не должно ломаться там, где /proc недоступен
+  if screen_quiet_console && screen_restore_console; then
+    pass "приглушение консоли отрабатывает без ошибок"
+  else
+    fail "приглушение консоли завершилось ошибкой"
+  fi
+
   # выбор пункта меню в текстовом режиме
   UPLOAD_MAX=""
   ui_menu UPLOAD_MAX "Размер:" "128M" v_size "8M|" "64M|" "256M|" "512M|" >/dev/null <<< "3"
@@ -490,6 +558,15 @@ printf '\n\033[1mПроверка отдельных функций\033[0m\n'
 
   exit 0
 ) || FAILED=1
+
+# тексты диалоговых окон не должны содержать литеральных \n: whiptail их
+# развернёт, а высота окна считается до этого — текст обрежется
+if grep -nP '(ui_msg|--msgbox|--yesno|--inputbox|--passwordbox|--checklist|--menu) "[^"]*\\\\n' "${ROOT}"/lib/*.sh >/dev/null 2>&1; then
+  fail "в текстах окон остались литеральные \\n"
+  grep -nP '(ui_msg|--msgbox|--yesno|--inputbox|--passwordbox|--checklist|--menu) "[^"]*\\\\n' "${ROOT}"/lib/*.sh | head -3
+else
+  pass "в текстах окон нет литеральных \\n"
+fi
 
 printf '\n'
 [[ -s "$FAILLOG" ]] && FAILED=1
