@@ -29,7 +29,7 @@ ADMIN_IPS="${ADMIN_IPS:-}"
 
 # Адрес, с которого сейчас зашли по SSH: под sudo SSH_CLIENT стёрт, берём из who
 current_ssh_ip() {
-  local ip="${SSH_CLIENT%% *}"
+  local ip="${SSH_CLIENT:-}"; ip="${ip%% *}"
   [[ -n "$ip" ]] || ip="$(who -m 2>/dev/null | sed -n 's/.*(\([0-9a-fA-F.:]*\)).*/\1/p' | head -n1)"
   printf '%s' "$ip"
 }
