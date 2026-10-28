@@ -1,0 +1,4 @@
+# Скрипты исполняются на Linux: CRLF после checkout на Windows ломает bash
+# («$'\r': command not found»), поэтому переводы строк всегда LF.
+* text=auto eol=lf
+*.png binary

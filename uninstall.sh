@@ -82,6 +82,9 @@ if command -v a2dissite >/dev/null 2>&1; then a2dissite "${SITE_DOMAIN}.conf" >/
 rm -f "/etc/apache2/sites-available/${SITE_DOMAIN}.conf"
 if command -v apache2ctl >/dev/null 2>&1 && apache2ctl configtest >/dev/null 2>&1; then systemctl reload apache2 || true; fi
 rm -f "/etc/fail2ban/jail.d/wp-autoinstall.local"
+# без перезапуска fail2ban продолжает следить за журналом удалённого сайта,
+# а при следующем старте падает на отсутствующем logpath
+if systemctl is-active --quiet fail2ban 2>/dev/null; then systemctl restart fail2ban || true; fi
 for d in "/etc/nginx/wp-autoinstall/${SITE_DOMAIN}.d" "/etc/apache2/wp-autoinstall/${SITE_DOMAIN}.d"; do
   if [[ -d "$d" ]]; then
     BAKD="/root/backup-rules-${SITE_DOMAIN}-$(date +%Y%m%d%H%M%S)"

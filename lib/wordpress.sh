@@ -5,9 +5,23 @@
 WP_CLI_BIN="/usr/local/bin/wp"
 WP_URL_SCHEME="http"
 
+# sudo стирает окружение (env_reset), поэтому прокси передаём явно — иначе
+# `wp core download` и языковые пакеты на сервере за прокси не скачиваются.
+# PHP берём той версии, под которую настроен сайт: после ppa:ondrej/php
+# команда `php` может указывать на более новую версию без расширения mysql.
 wp_cli() {
-  sudo -u www-data env HOME=/tmp WP_CLI_CACHE_DIR=/tmp/.wp-cli-cache \
-    "$WP_CLI_BIN" --path="$WP_PATH" "$@"
+  local -a penv=()
+  mapfile -t penv < <(proxy_env_args)
+  sudo -u www-data env HOME=/tmp WP_CLI_CACHE_DIR=/tmp/.wp-cli-cache "${penv[@]}" \
+    "$(php_cli_bin)" "$WP_CLI_BIN" --path="$WP_PATH" "$@"
+}
+
+php_cli_bin() {
+  if [[ -n "${PHP_VER:-}" && -x "/usr/bin/php${PHP_VER}" ]]; then
+    printf '%s' "/usr/bin/php${PHP_VER}"
+  else
+    printf '%s' "$(command -v php || echo php)"
+  fi
 }
 
 install_wp_cli() {
@@ -17,7 +31,7 @@ install_wp_cli() {
   fi
   step "Загрузка WP-CLI"
   if run curl -fsSL -o /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
-     && php /tmp/wp-cli.phar --info >>"$LOG_FILE" 2>&1; then
+     && "$(php_cli_bin)" /tmp/wp-cli.phar --info >>"$LOG_FILE" 2>&1; then
     install -m 0755 /tmp/wp-cli.phar "$WP_CLI_BIN"
     WP_CLI_OK=1
     ok "WP-CLI установлен ($("$WP_CLI_BIN" --version --allow-root 2>/dev/null | head -n1))"
@@ -114,6 +128,7 @@ configure_wordpress() {
     echo "define( 'WP_HOME', '${WP_URL_SCHEME}://${SITE_DOMAIN}' );"
     echo "define( 'WP_SITEURL', '${WP_URL_SCHEME}://${SITE_DOMAIN}' );"
     echo "define( 'WPLANG', '${q_locale}' );"
+    proxy_wp_config_lines
     if [[ "${WP_DEBUG_MODE:-no}" == "yes" ]]; then
       echo "define( 'WP_DEBUG', true );"
       echo "define( 'WP_DEBUG_LOG', true );      // журнал: wp-content/debug.log"
@@ -208,8 +223,10 @@ update_option( 'permalink_structure', '/%postname%/' );
 echo "installed\n";
 PHPEOF
   chmod 644 "$php_script"
+  local -a penv=()
+  mapfile -t penv < <(proxy_env_args)
   # shellcheck disable=SC2024  # лог пишется root-шеллом, а не www-data
-  sudo -u www-data env HOME=/tmp php "$php_script" \
+  sudo -u www-data env HOME=/tmp "${penv[@]}" "$(php_cli_bin)" "$php_script" \
     "$WP_PATH" "$SITE_TITLE" "$WP_ADMIN_USER" "$WP_ADMIN_PASS" "$WP_EMAIL" "$WP_LOCALE" >>"$LOG_FILE" 2>&1 \
     || die "Не удалось выполнить установку WordPress (см. $LOG_FILE)."
   rm -f "$php_script"

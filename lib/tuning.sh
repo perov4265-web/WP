@@ -213,6 +213,7 @@ write_robots() {
   local f="${WP_PATH}/robots.txt"
   if [[ -f "$f" ]]; then
     step "robots.txt уже есть — не трогаем"
+    [[ "${BOT_TRAPS:-no}" == "yes" ]] && warn "Добавьте в robots.txt строку «Disallow: ${TRAP_PATH}» — без неё приманка поймает и честных роботов."
     return 0
   fi
   cat > "$f" <<ROBOTS
@@ -222,6 +223,7 @@ Disallow: /*?s=
 Disallow: /*?p=
 Disallow: /wp-admin/
 Allow: /wp-admin/admin-ajax.php
+$( [[ "${BOT_TRAPS:-no}" == "yes" ]] && printf 'Disallow: %s\n' "$TRAP_PATH" || true )
 
 Sitemap: ${WP_URL_SCHEME}://${SITE_DOMAIN}/wp-sitemap.xml
 ROBOTS

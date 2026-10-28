@@ -14,15 +14,20 @@
 #
 set -euo pipefail
 
-VERSION="1.4.4"
+VERSION="2.0.0"
 
-# Рамки и выравнивание требуют UTF-8: если локаль не юникодная, переключаемся на
-# C.UTF-8 (есть в любой Ubuntu) — иначе кириллица считается по байтам и «едет».
-if ! locale charmap 2>/dev/null | grep -qi 'utf-\?8'; then
-  if locale -a 2>/dev/null | grep -qix 'C\.UTF-\?8'; then
-    export LC_ALL=C.UTF-8 LANG=C.UTF-8
-  fi
+# Локаль. Скрипт разбирает вывод apt-cache, systemctl, mysql и прочих утилит,
+# а при ru_RU они отвечают по-русски («Кандидат:» вместо «Candidate:») — поиск
+# пакетов молча ничего не находил, и установка PHP падала с «не найдено ни
+# одного пакета». Поэтому всё, что запускаем, говорит по-английски (C), а
+# кодировка остаётся UTF-8, чтобы рамки и кириллица интерфейса не «ехали».
+# LANGUAGE сбрасываем: у gettext он главнее LANG.
+if locale -a 2>/dev/null | grep -qix 'C\.UTF-\?8'; then
+  export LC_ALL=C.UTF-8 LANG=C.UTF-8
+else
+  export LC_ALL=C LANG=C
 fi
+export LANGUAGE=
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="${SCRIPT_DIR}/lib"
 
@@ -73,11 +78,17 @@ FPM_MAX_CHILDREN="${FPM_MAX_CHILDREN:-}"
 FPM_TIMEOUT="${FPM_TIMEOUT:-}"
 DB_MAX_STATEMENT_TIME="${DB_MAX_STATEMENT_TIME:-30}"
 DB_BUFFER_POOL_MB="${DB_BUFFER_POOL_MB:-}"
+PROXY_URL="${PROXY_URL:-}"
+NO_PROXY_LIST="${NO_PROXY_LIST:-}"
+DB_ROOT_RESET="${DB_ROOT_RESET:-ask}"
+BOT_TRAPS="${BOT_TRAPS:-}"
+TRAP_BANTIME="${TRAP_BANTIME:-1d}"
+SSH_HARDEN="${SSH_HARDEN:-}"
 EXTRA_DIR=""
 WP_CLI_OK=0
 CRED_FILE=""
 
-for f in common.sh screen.sh ui.sh prompts.sh packages.sh database.sh wordpress.sh webserver.sh tuning.sh extras.sh; do
+for f in common.sh screen.sh ui.sh prompts.sh proxy.sh packages.sh database.sh wordpress.sh webserver.sh tuning.sh extras.sh security.sh; do
   [[ -r "${LIB_DIR}/${f}" ]] || { echo "Не найден модуль ${LIB_DIR}/${f}" >&2; exit 1; }
   # shellcheck source=/dev/null
   # shellcheck disable=SC1090,SC1091
@@ -87,6 +98,8 @@ done
 cleanup_on_exit() {
   declare -F screen_restore >/dev/null && screen_restore
   rm -f "/tmp/wp-install-$$.php"
+  [[ -n "${DB_ROOT_CNF:-}" ]] && rm -f "$DB_ROOT_CNF"
+  return 0
 }
 trap 'on_error $LINENO' ERR
 trap cleanup_on_exit EXIT
@@ -97,6 +110,9 @@ build_screen_lines() {
   [[ "$INSTALL_PMA" == "yes" ]] && extras+=("phpMyAdmin")
   [[ "$INSTALL_SSL" == "yes" ]] && extras+=("SSL")
   [[ "$INSTALL_FIREWALL" == "yes" ]] && extras+=("UFW+fail2ban")
+  [[ "$BOT_TRAPS" == "yes" ]] && extras+=("ловушки")
+  [[ "$SSH_HARDEN" == "yes" ]] && extras+=("SSH по ключу")
+  [[ -n "$PROXY_URL" ]] && extras+=("прокси")
   [[ "$INSTALL_CACHE" == "yes" ]] && extras+=("кэш")
   [[ "$SETUP_SWAP" == "yes" ]] && extras+=("swap")
   local extras_str="нет" i
@@ -126,6 +142,7 @@ count_phases() {
   [[ "$INSTALL_PMA" == "yes" ]] && n=$(( n + 1 ))
   [[ "$INSTALL_SSL" == "yes" ]] && n=$(( n + 1 ))
   [[ "$INSTALL_FIREWALL" == "yes" ]] && n=$(( n + 1 ))
+  [[ "$INSTALL_FIREWALL" == "yes" || "$BOT_TRAPS" == "yes" || "$SSH_HARDEN" == "yes" ]] && n=$(( n + 1 ))
   printf '%s' "$n"
 }
 
@@ -178,6 +195,8 @@ main() {
   mapfile -t screen_lines < <(build_screen_lines)
   screen_start "$(count_phases)" "${screen_lines[@]}" || true
 
+  setup_proxy
+  check_internet
   setup_swap
   install_base_packages
   detect_php
@@ -196,6 +215,7 @@ main() {
 
   setup_ssl
   setup_firewall
+  setup_protection
   write_robots
   harden_permissions
 

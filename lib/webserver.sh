@@ -42,6 +42,7 @@ nginx_global_snippet() {
       printf '                   inactive=60m max_size=512m;\n'
       printf 'fastcgi_cache_key "$scheme$request_method$host$request_uri";\n'
     fi
+    nginx_bot_maps
   } > "$f"
 
   if [[ "${INSTALL_CACHE}" == "yes" ]]; then
@@ -67,6 +68,12 @@ configure_webserver() {
       warn "Файл своих правил не найден: ${NGINX_EXTRA_CONF}"
     fi
   fi
+
+  if [[ "$WEB_SERVER" == "apache" && "${BOT_TRAPS:-no}" == "yes" ]]; then
+    warn "Ловушки для ботов сделаны для nginx — на Apache пропускаем."
+    BOT_TRAPS=no
+  fi
+  [[ "${BOT_TRAPS:-no}" == "yes" ]] && trap_path_init
 
   case "$WEB_SERVER" in
     nginx)  configure_nginx ;;
@@ -125,6 +132,8 @@ __CACHE_VARS__
     # Файлы кладутся в __EXTRA_DIR__ и подхватываются после перезагрузки nginx.
     include __EXTRA_DIR__/*.conf;
 
+__BOT_RULES__
+
     location = /favicon.ico { log_not_found off; access_log off; }
     location = /robots.txt  { allow all; log_not_found off; access_log off; }
 
@@ -132,10 +141,13 @@ __CACHE_VARS__
         # Поиск по сайту ограничен по частоте: на большой базе он выполняется
         # десятки секунд и способен занять все воркеры PHP-FPM.
         limit_req zone=wpsearch burst=5 nodelay;
+        limit_req zone=aibots burst=10 nodelay;
         try_files $uri $uri/ /index.php?$args;
     }
 
+__LOGIN_BLOCK__
     location ~ \.php$ {
+        limit_req zone=aibots burst=10 nodelay;
         include snippets/fastcgi-php.conf;
         fastcgi_pass __FPM_PASS__;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
@@ -197,6 +209,11 @@ CF
   local tpl names
   names="$(server_names)"
   tpl="$(cat "$conf")"
+  local bot_rules login_block
+  bot_rules="$(nginx_bot_server_rules)"
+  login_block="$(nginx_login_location)"
+  tpl="${tpl//__LOGIN_BLOCK__/$login_block}"
+  tpl="${tpl//__BOT_RULES__/$bot_rules}"
   tpl="${tpl//__PMA_BLOCK__/$pma_block}"   # блок phpMyAdmin вставляем первым:
   tpl="${tpl//__SERVER_NAMES__/$names}"   # внутри него тоже есть плейсхолдеры
   tpl="${tpl//__WP_PATH__/$WP_PATH}"

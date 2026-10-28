@@ -73,6 +73,25 @@ wp-autoinstall — установка WordPress на Ubuntu и Debian одной
       --no-robots          Не создавать robots.txt
       --debug-wp           Включить журнал ошибок WordPress (WP_DEBUG_LOG)
 
+СЕТЬ И ПРОКСИ
+      --proxy URL          Выходить в интернет через прокси: http://хост:порт
+                           или http://логин:пароль@хост:порт. Без опции берётся
+                           из http(s)_proxy, /etc/environment или настроек apt;
+                           --proxy none — не использовать найденный
+      --no-proxy-for СПИС  Адреса мимо прокси через запятую (localhost и сам
+                           сайт добавляются всегда)
+
+ЗАЩИТА ОТ БОТОВ И АТАК
+      --bot-traps / --no-bot-traps   Ловушки для сканеров и скрытая ссылка-
+                           приманка; попавшийся адрес банит fail2ban (nginx)
+      --trap-bantime ВРЕМЯ Срок бана за ловушку, формат fail2ban (1d)
+      --ai-bot-rate ТЕМП   Лимит для ИИ-сборщиков на всё семейство бота (30r/m)
+      --admin-ip СПИСОК    Адреса, которые fail2ban не банит никогда (через
+                           запятую); адрес текущей SSH-сессии добавляется сам
+      --ssh-harden         SSH только по ключу (если ключ уже лежит на сервере)
+      --db-root-reset      Сбросить неизвестный пароль root СУБД без вопроса
+      --no-db-root-reset   Никогда не сбрасывать пароль root СУБД
+
 ПРИМЕРЫ
   sudo ./install.sh
   sudo ./install.sh -c my-site.conf -y
@@ -158,6 +177,16 @@ parse_args() {
       --fpm-children) set_opt FPM_MAX_CHILDREN "${2:?}"; shift 2 ;;
       --fpm-timeout)  set_opt FPM_TIMEOUT "${2:?}"; shift 2 ;;
       --db-time)      set_opt DB_MAX_STATEMENT_TIME "${2:?}"; shift 2 ;;
+      --proxy)        set_opt PROXY_URL "${2:?}"; shift 2 ;;
+      --no-proxy-for) set_opt NO_PROXY_LIST "${2:?}"; shift 2 ;;
+      --bot-traps)    set_opt BOT_TRAPS yes; shift ;;
+      --no-bot-traps) set_opt BOT_TRAPS no; shift ;;
+      --trap-bantime) set_opt TRAP_BANTIME "${2:?}"; shift 2 ;;
+      --ai-bot-rate)  set_opt AI_BOT_RATE "${2:?}"; shift 2 ;;
+      --admin-ip)     set_opt ADMIN_IPS "${2:?}"; shift 2 ;;
+      --ssh-harden)   set_opt SSH_HARDEN yes; shift ;;
+      --db-root-reset) set_opt DB_ROOT_RESET yes; shift ;;
+      --no-db-root-reset) set_opt DB_ROOT_RESET no; shift ;;
       *) printf 'Неизвестная опция: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
     esac
   done
@@ -170,6 +199,8 @@ UPLOAD_MAX MAX_INPUT_VARS PHP_MEMORY_LIMIT MAX_EXEC_TIME \
 INSTALL_PMA INSTALL_SSL INSTALL_FIREWALL INSTALL_CACHE SETUP_SWAP SWAP_SIZE \
 CREATE_ROBOTS WP_DEBUG_MODE SEARCH_RATE SSH_ALLOW_FROM NGINX_EXTRA_CONF \
 FPM_MAX_CHILDREN FPM_TIMEOUT DB_MAX_STATEMENT_TIME DB_BUFFER_POOL_MB \
+PROXY_URL NO_PROXY_LIST DB_ROOT_RESET BOT_TRAPS TRAP_PATH TRAP_BANTIME AI_BOT_RATE \
+ADMIN_IPS SSH_HARDEN \
 FORCE VERBOSE"
 
 # Читаем файл построчно (без выполнения кода): КЛЮЧ=значение, кавычки необязательны.
@@ -244,7 +275,8 @@ collect_params() {
     "ru_RU|Русский" "en_US|English (US)" "uk|Українська" "kk|Қазақша" \
     "de_DE|Deutsch" "fr_FR|Français" "es_ES|Español"
 
-  ui_input  WP_ADMIN_USER "Логин администратора WordPress:" "admin" v_notempty
+  # «admin» боты перебирают первым, поэтому по умолчанию — неочевидное имя
+  ui_input  WP_ADMIN_USER "Логин администратора WordPress:" "adm_$(rand_suffix 5)" v_notempty
   ui_secret WP_ADMIN_PASS "Пароль администратора WordPress:" v_wppass
   local def_email="admin@${SITE_DOMAIN}"
   # на IP-адресе admin@203.0.113.10 — не адрес, подставлять его бессмысленно
@@ -283,11 +315,14 @@ collect_params() {
   local -a comps=(
     "INSTALL_PMA|phpMyAdmin|веб-интерфейс к базе данных|off"
     "INSTALL_SSL|SSL|сертификат Let's Encrypt, нужен домен|${ssl_state}"
-    "INSTALL_FIREWALL|Брандмауэр|UFW и fail2ban против подбора паролей|off"
+    "INSTALL_FIREWALL|Брандмауэр|UFW и fail2ban против подбора паролей|on"
+    "SSH_HARDEN|SSH по ключу|запретить вход по паролю (ключ уже должен быть)|off"
   )
   # кэш страниц умеет только nginx
-  [[ "$WEB_SERVER" == "nginx" ]] && \
+  if [[ "$WEB_SERVER" == "nginx" ]]; then
     comps+=("INSTALL_CACHE|Кэш|отдавать ботам готовый HTML мимо PHP|off")
+    comps+=("BOT_TRAPS|Ловушки|бан сканеров и ботов, лимит ИИ-сборщикам|on")
+  fi
   # подкачку предлагаем, только если её ещё нет
   if [[ -z "$(swapon --show --noheadings 2>/dev/null)" ]]; then
     comps+=("SETUP_SWAP|Подкачка|файл подкачки ${SWAP_SIZE:-2G}, страховка от нехватки памяти|on")
@@ -307,6 +342,8 @@ collect_params() {
   INSTALL_FIREWALL="${INSTALL_FIREWALL:-no}"
   INSTALL_CACHE="${INSTALL_CACHE:-no}"
   SETUP_SWAP="${SETUP_SWAP:-no}"
+  BOT_TRAPS="${BOT_TRAPS:-no}"
+  SSH_HARDEN="${SSH_HARDEN:-no}"
 }
 
 # Значение для файла параметров: всегда в двойных кавычках, переводы строк убираем
@@ -378,6 +415,15 @@ save_config_file() {
     printf '# FPM_TIMEOUT=       # пусто — max_execution_time + 30 с\n'
     printf '# NGINX_EXTRA_CONF=  # свой файл правил веб-сервера\n'
     printf '# SSH_ALLOW_FROM=    # открыть SSH только с этого адреса\n'
+    printf '\n# ---------- сеть и защита ----------\n'
+    printf 'PROXY_URL=%s\n'      "$(cfg_quote "${PROXY_URL:-}")"
+    printf 'BOT_TRAPS=%s\n'      "$(cfg_quote "${BOT_TRAPS:-no}")"
+    printf 'TRAP_PATH=%s\n'      "$(cfg_quote "${TRAP_PATH:-}")"
+    printf 'TRAP_BANTIME=%s\n'   "$(cfg_quote "${TRAP_BANTIME:-1d}")"
+    printf 'AI_BOT_RATE=%s\n'    "$(cfg_quote "${AI_BOT_RATE:-30r/m}")"
+    printf 'ADMIN_IPS=%s\n'      "$(cfg_quote "${ADMIN_IPS:-}")"
+    printf 'SSH_HARDEN=%s\n'     "$(cfg_quote "${SSH_HARDEN:-no}")"
+    printf 'DB_ROOT_RESET=%s\n'  "$(cfg_quote "${DB_ROOT_RESET:-ask}")"
   } >> "$path"
 
   ok "Параметры сохранены: ${path} (права 600)"
@@ -434,6 +480,21 @@ validate_tuning_params() {
     [[ "$SSH_ALLOW_FROM" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]] \
       || die "Неверный адрес для --ssh-from: '${SSH_ALLOW_FROM}'. Ожидается IPv4 или подсеть, например 203.0.113.5 или 203.0.113.0/24."
   fi
+  v="${AI_BOT_RATE:-30r/m}"
+  [[ "$v" =~ ^[0-9]+r/[sm]$ ]] || die "Неверный формат --ai-bot-rate: '${v}'. Ожидается вид 30r/m."
+  v="${TRAP_BANTIME:-1d}"
+  [[ "$v" =~ ^[0-9]+[smhdw]?$ ]] || die "Неверный срок бана --trap-bantime: '${v}'. Ожидается вид 1d, 12h, 1w."
+  if [[ -n "${TRAP_PATH:-}" && ! "$TRAP_PATH" =~ ^/[A-Za-z0-9_-]+/$ ]]; then
+    die "Неверный TRAP_PATH: '${TRAP_PATH}'. Ожидается вид /archive-abc123/."
+  fi
+  if [[ -n "${ADMIN_IPS:-}" ]]; then
+    [[ "$ADMIN_IPS" =~ ^[0-9A-Fa-f.:/]+(,[0-9A-Fa-f.:/]+)*$ ]] \
+      || die "Неверный список --admin-ip: '${ADMIN_IPS}'. Адреса или подсети через запятую, без пробелов."
+  fi
+  case "${DB_ROOT_RESET:-ask}" in yes|no|ask) ;; *) die "DB_ROOT_RESET: yes, no или ask." ;; esac
+  if [[ -n "${PROXY_URL:-}" && "$PROXY_URL" != "none" ]]; then
+    local msg; msg="$(v_proxy "$PROXY_URL")" || die "Неверный адрес прокси '${PROXY_URL}': ${msg}"
+  fi
   if [[ -n "${NGINX_EXTRA_CONF:-}" && ! -r "$NGINX_EXTRA_CONF" ]]; then
     die "Файл своих правил веб-сервера не найден или недоступен: ${NGINX_EXTRA_CONF}"
   fi
@@ -463,6 +524,9 @@ confirm_params() {
   phpMyAdmin ............ ${INSTALL_PMA}
   SSL (Let's Encrypt) ... ${INSTALL_SSL}
   UFW + fail2ban ........ ${INSTALL_FIREWALL}
+  Ловушки для ботов ..... ${BOT_TRAPS:-no}
+  SSH только по ключу ... ${SSH_HARDEN:-no}
+  Прокси ................ ${PROXY_URL:-автоопределение}
   Кэш страниц ........... ${INSTALL_CACHE}
   Файл подкачки ......... ${SETUP_SWAP}
 SUM

@@ -96,75 +96,50 @@ setup_ssl() {
   switch_site_to_https
 }
 
-# ------------------------------------------------------------ UFW + fail2ban
+# ------------------------------------------------------------------- UFW
+# fail2ban настраивается в lib/security.sh (setup_protection).
 setup_firewall() {
   [[ "${INSTALL_FIREWALL}" == "yes" ]] || return 0
-  info "Настройка UFW и fail2ban"
+  info "Настройка UFW"
 
-  apt_install ufw fail2ban
+  apt_install ufw
+
+  # Docker публикует порты мимо UFW (свои цепочки iptables) — правила UFW
+  # контейнеры не закрывают, для них нужна цепочка DOCKER-USER.
+  if require_cmd docker; then
+    warn "На сервере есть Docker: порты контейнеров UFW не закрывает, правила для них — в цепочке DOCKER-USER."
+  fi
+
+  # Порт SSH берём у самого sshd: если он не 22, правило «OpenSSH» откроет
+  # не тот порт и `ufw enable` отрежет нас от сервера.
+  local ssh_port
+  ssh_port="$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')"
+  ssh_port="${ssh_port:-22}"
+
+  # Без `ufw reset`: на сервере, где уже что-то работает, он стирает чужие
+  # правила (почта, радио, панели). Только добавляем недостающее.
   step "Правила UFW"
-  run ufw --force reset || true
   run ufw default deny incoming || true
   run ufw default allow outgoing || true
   if [[ -n "${SSH_ALLOW_FROM:-}" ]]; then
-    run ufw allow from "$SSH_ALLOW_FROM" to any port 22 proto tcp \
+    local me; me="$(current_ssh_ip)"
+    if [[ -n "$me" && "$me" != "${SSH_ALLOW_FROM%/*}" && "$SSH_ALLOW_FROM" != */* ]]; then
+      warn "Вы зашли с ${me}, а SSH открывается только с ${SSH_ALLOW_FROM}. Проверьте, что не отрежете себя."
+    fi
+    run ufw allow from "$SSH_ALLOW_FROM" to any port "$ssh_port" proto tcp \
       || { warn "Не удалось ограничить SSH адресом ${SSH_ALLOW_FROM} — открываю порт для всех."
-           run ufw allow OpenSSH || run ufw allow 22/tcp || true; }
-    ok "SSH открыт только с ${SSH_ALLOW_FROM}"
+           run ufw allow "${ssh_port}/tcp" || true; }
   else
-    run ufw allow OpenSSH || run ufw allow 22/tcp || true
+    run ufw limit "${ssh_port}/tcp" || run ufw allow "${ssh_port}/tcp" || true
   fi
-  if [[ "$WEB_SERVER" == "nginx" ]]; then
-    run ufw allow 'Nginx Full' || run ufw allow 80,443/tcp || true
-  else
-    run ufw allow 'Apache Full' || run ufw allow 80,443/tcp || true
-  fi
+  run ufw allow 80/tcp || true
+  run ufw allow 443/tcp || true
+  run ufw logging off || true   # журнал UFW на загруженном сервере растёт гигабайтами
   run ufw --force enable
   if [[ -n "${SSH_ALLOW_FROM:-}" ]]; then
-    ok "UFW включён (80, 443 для всех; 22 только с ${SSH_ALLOW_FROM})"
+    ok "UFW включён (80, 443 для всех; SSH ${ssh_port} только с ${SSH_ALLOW_FROM})"
   else
-    ok "UFW включён (открыты 22, 80, 443)"
-  fi
-
-  local access_log
-  if [[ "$WEB_SERVER" == "nginx" ]]; then
-    access_log="/var/log/nginx/${SITE_DOMAIN}.access.log"
-  else
-    access_log="/var/log/apache2/${SITE_DOMAIN}-access.log"
-  fi
-  touch "$access_log" 2>/dev/null || true
-
-  cat > /etc/fail2ban/filter.d/wordpress-auth.conf <<'F2B'
-# Создано wp-autoinstall: подбор паролей к wp-login.php и xmlrpc.php
-[Definition]
-failregex = ^<HOST> .* "POST [^"]*/wp-login\.php
-            ^<HOST> .* "POST [^"]*/xmlrpc\.php
-ignoreregex =
-F2B
-
-  cat > /etc/fail2ban/jail.d/wp-autoinstall.local <<JAIL
-[sshd]
-enabled  = true
-backend  = systemd
-maxretry = 5
-bantime  = 1h
-
-[wordpress-auth]
-enabled  = true
-filter   = wordpress-auth
-port     = http,https
-logpath  = ${access_log}
-backend  = auto
-maxretry = 5
-findtime = 5m
-bantime  = 1h
-JAIL
-
-  run systemctl enable fail2ban || true
-  if run systemctl restart fail2ban; then
-    ok "fail2ban защищает SSH и вход в WordPress"
-  else
-    warn "fail2ban не запустился — проверьте: systemctl status fail2ban"
+    ok "UFW включён (80, 443; SSH ${ssh_port} с ограничением частоты)"
   fi
 }
 
@@ -196,6 +171,9 @@ PHP ...................... ${PHP_VER} (${PHP_FPM_SERVICE})
 phpMyAdmin ............... $( [[ "$INSTALL_PMA" == "yes" ]] && echo "${WP_URL_SCHEME}://${SITE_DOMAIN}/phpmyadmin/" || echo "не установлен" )
 SSL ...................... $( [[ "$INSTALL_SSL" == "yes" ]] && echo "Let's Encrypt, автопродление включено" || echo "не настроен" )
 Брандмауэр ............... $( [[ "$INSTALL_FIREWALL" == "yes" ]] && echo "UFW + fail2ban" || echo "не настроен" )
+Ловушки для ботов ........ $( [[ "${BOT_TRAPS:-no}" == "yes" ]] && echo "да, приманка ${TRAP_PATH}, журнал ${TRAP_LOG}" || echo "нет" )
+SSH ...................... $( [[ "${SSH_HARDEN:-no}" == "yes" ]] && echo "только по ключу" || echo "не менялся" )
+Прокси ................... ${PROXY_HOST:-нет}${PROXY_PORT:+:${PROXY_PORT}}
 
 Устойчивость:
   Воркеров PHP-FPM ....... ${FPM_MAX_CHILDREN:-по объёму памяти}

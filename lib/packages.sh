@@ -4,7 +4,10 @@
 # shellcheck disable=SC2034  # переменные используются в соседних модулях
 
 export DEBIAN_FRONTEND=noninteractive
-export NEEDRESTART_MODE=a
+# l — только перечислить: в режиме a needrestart на живой машине с Docker
+# обходил все процессы и поднимал нагрузку до 30, падали соседние службы.
+# Свои службы скрипт перезапускает сам.
+export NEEDRESTART_MODE=l
 export NEEDRESTART_SUSPEND=1
 
 APT_UPDATED=0
@@ -34,9 +37,11 @@ apt_install_optional() {
   done
 }
 
+# Локаль задаём и здесь: модуль подключают и без install.sh (uninstall, тесты),
+# а при русской локали строка называется «Кандидат:» и awk её не находит.
 apt_candidate_exists() {
   local c
-  c="$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/{print $2}')"
+  c="$(LC_ALL=C LANGUAGE= apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/{print $2; exit}')"
   [[ -n "$c" && "$c" != "(none)" ]]
 }
 
@@ -106,7 +111,7 @@ install_db_server_pkg() {
 
 # ------------------------------------------------------------------------- PHP
 # Список расширений, нужных WordPress (без префикса версии).
-PHP_EXT=(fpm mysql curl gd mbstring xml zip intl bcmath soap opcache)
+PHP_EXT=(fpm cli mysql curl gd mbstring xml zip intl bcmath soap opcache)
 PHP_EXT_OPTIONAL=(imagick igbinary)
 
 install_php_packages() {
@@ -225,6 +230,13 @@ detect_php() {
   else
     PHP_FPM_PASS="${listen}"
   fi
+  # С ppa:ondrej/php в систему нередко приезжает вторая, более новая версия
+  # (её тянут php-common, imagick и т. п.), и `php` начинает указывать на неё —
+  # а расширения mysql там нет, WP-CLI падает с «missing the MySQL extension».
+  if [[ -x "/usr/bin/php${PHP_VER}" ]] && require_cmd update-alternatives; then
+    run update-alternatives --set php "/usr/bin/php${PHP_VER}" || true
+  fi
+  "$(command -v "php${PHP_VER}" || echo php)" -m 2>/dev/null | grep -qix 'mysqli'     || warn "У PHP ${PHP_VER} не загружается расширение mysqli — проверьте пакет php${PHP_VER}-mysql."
   ok "PHP ${PHP_VER}, служба ${PHP_FPM_SERVICE}, сокет ${PHP_FPM_LISTEN}"
 }
 

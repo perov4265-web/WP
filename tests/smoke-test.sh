@@ -108,6 +108,7 @@ case "$url" in
     done
     exit 0 ;;
   *wp-cli.phar*) exit 1 ;;      # проверяем путь установки без WP-CLI
+  *version-check*) exit 0 ;;    # проверка выхода в интернет
   *wordpress.org/latest*)
     d=$(mktemp -d)
     mkdir -p "$d/wordpress/wp-includes" "$d/wordpress/wp-content/themes" "$d/wordpress/wp-admin"
@@ -190,6 +191,8 @@ SETUP_SWAP=no
 CREATE_ROBOTS=yes
 DB_MAX_STATEMENT_TIME=30
 SEARCH_RATE=20r/m
+BOT_TRAPS=yes
+PROXY_URL=http://pxuser:p%40ss@proxy.test:3128
 CFG
 
 printf '\n\033[1mПрогон install.sh с заглушками\033[0m\n'
@@ -310,6 +313,41 @@ ROB="${WPDIR}/robots.txt"
 check "robots.txt: поиск закрыт"       "$ROB" "Disallow: /*?s="
 check "robots.txt: админка закрыта"    "$ROB" "Disallow: /wp-admin/"
 check "robots.txt: admin-ajax разрешён" "$ROB" "Allow: /wp-admin/admin-ajax.php"
+
+check "robots.txt: приманка закрыта"   "$ROB" "Disallow: /archive-"
+
+# прокси
+check "прокси: apt"                     "/etc/apt/apt.conf.d/95wp-autoinstall-proxy" 'Acquire::http::Proxy "http://pxuser:p%40ss@proxy.test:3128";'
+check "прокси: WordPress, хост"         "$CFGF" "define( 'WP_PROXY_HOST', 'proxy.test' );"
+check "прокси: WordPress, пароль раскодирован" "$CFGF" "define( 'WP_PROXY_PASSWORD', 'p@ss' );"
+
+# ловушки и защита
+check "ловушки: map адресов сканеров"   "$GLOB" 'map $uri $wp_trap_uri'
+check "ловушки: phpMyAdmin не ловушка"  "$GLOB" '"~*^/phpmyadmin/"'
+check "ловушки: зона ИИ-сборщиков"      "$GLOB" "zone=aibots"
+check "ловушки: зона входа"             "$GLOB" "zone=wplogin"
+check "ловушки: журнал в server"        "$NG" "wp-trap.log wp_timed if=\$wp_trap;"
+check "ловушки: приманка в server"      "$NG" "location ^~ /archive-"
+check "вход: лимит на wp-login.php"     "$NG" "location = /wp-login.php"
+check "fail2ban: jail ловушек"          "/etc/fail2ban/jail.d/wp-autoinstall.local" "[wp-trap]"
+check "fail2ban: нарастающий бан"       "/etc/fail2ban/jail.d/wp-autoinstall.local" "bantime.multipliers = 1 24 168"
+check "fail2ban: только неудачный вход" "/etc/fail2ban/filter.d/wordpress-auth.conf" "(?:200|429)"
+MU="${WPDIR}/wp-content/mu-plugins/wp-autoinstall-guard.php"
+check "mu-плагин: XML-RPC выключен"     "$MU" "xmlrpc_enabled"
+check "mu-плагин: ссылка-приманка"      "$MU" 'href="/archive-'
+
+# русская локаль: apt-cache отвечает «Кандидат:», если его не переключить в C
+mkdir -p "${MOCK}/ru"
+cat > "${MOCK}/ru/apt-cache" <<'M'
+#!/bin/sh
+case "${LC_ALL:-}" in C|C.UTF-8) echo "  Candidate: 8.3" ;; *) echo "  Кандидат:   8.3" ;; esac
+M
+chmod +x "${MOCK}/ru/apt-cache"
+if PATH="${MOCK}/ru:${PATH}" LC_ALL=ru_RU.UTF-8 bash -c      '. "$1/lib/common.sh"; . "$1/lib/packages.sh"; apt_candidate_exists php8.3-fpm' _ "$ROOT"; then
+  pass "apt: пакет находится и при русской локали"
+else
+  fail "apt: при русской локали пакет не найден"
+fi
 
 [[ -x /usr/local/bin/wp-autoinstall-check ]] && pass "команда проверки установлена" || fail "команды проверки нет"
 check "файл доступов: раздел устойчивости" "$CRED" "Обрыв тяжёлого SQL"
