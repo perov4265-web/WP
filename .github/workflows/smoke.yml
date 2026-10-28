@@ -1,0 +1,18 @@
+# Smoke-тест в одноразовом контейнере: тест пишет в /etc, поэтому не на самом раннере.
+name: smoke
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    container: ubuntu:24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Синтаксис bash
+        run: for f in install.sh uninstall.sh lib/*.sh tests/*.sh; do bash -n "$f" || exit 1; done
+      - name: Smoke-тест
+        run: bash tests/smoke-test.sh
